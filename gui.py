@@ -5,6 +5,8 @@ member-removal is driven through that same browser session.
 """
 
 import csv
+import os
+import queue
 import random
 import threading
 import time
@@ -14,7 +16,7 @@ from tkinter import ttk
 from typing import Dict, List, Optional, Set
 import re
 
-from fb_browser import FBBrowser, _group_id_from_input
+from fb_browser import FBBrowser, SESSION_FILE, _group_id_from_input
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -168,6 +170,36 @@ class RemovalScheduleDialog(tk.Toplevel):
         self.destroy()
 
 
+# ── Browser worker ────────────────────────────────────────────────────────────
+
+class BrowserWorker:
+    """Single persistent thread that owns the Playwright browser for the app lifetime."""
+
+    def __init__(self):
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            fn, args, kwargs = item
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass
+
+    def dispatch(self, fn, *args, **kwargs):
+        """Queue a callable for execution on the worker thread."""
+        self._queue.put((fn, args, kwargs))
+
+    def stop(self):
+        """Signal the worker thread to exit after all pending tasks complete."""
+        self._queue.put(None)
+
+
 # ── Application ───────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -183,6 +215,7 @@ class App(tk.Tk):
         self._stop_event = threading.Event()
         self._login_confirmed = threading.Event()
         self._browser: Optional[FBBrowser] = None
+        self._worker = BrowserWorker()
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -393,47 +426,45 @@ class App(tk.Tk):
         self._login_btn.config(state=tk.DISABLED)
         self._login_confirmed.clear()
         self._login_status_var.set("Opening browser…")
+        self._worker.dispatch(self._do_open_browser)
 
-        def worker():
-            try:
-                if self._browser:
-                    self._browser.close()
-                self._browser = FBBrowser()
-                already_in = self._browser.launch()
+    def _do_open_browser(self):
+        """Runs on the persistent worker thread — creates and owns the browser."""
+        try:
+            if self._browser:
+                self._browser.close()
+            self._browser = FBBrowser()
+            already_in = self._browser.launch()
 
-                if already_in:
-                    # Session still valid — skip login entirely
-                    name = self._browser.logged_in_as
-                    self.after(0, lambda n=name: self._on_login_success(n))
-                    return
+            if already_in:
+                name = self._browser.logged_in_as
+                self.after(0, lambda n=name: self._on_login_success(n))
+                return
 
-                # Need to log in — show the browser and wait
-                self.after(0, lambda: self._login_status_var.set(
-                    "Log in to Facebook in the browser window, "
-                    "then click \"I'm Logged In\"."
-                ))
-                self.after(0, lambda: self._confirm_login_btn.pack(
-                    side=tk.LEFT, padx=4, before=self._logout_btn
-                ))
-                ok = self._browser.wait_for_login(
-                    timeout_s=600,
-                    on_poll=lambda m: self.after(
-                        0, lambda msg=m: self._login_status_var.set(msg)
-                    ),
-                    confirm_event=self._login_confirmed,
-                )
-                self.after(0, self._confirm_login_btn.pack_forget)
-                if ok:
-                    name = self._browser.logged_in_as
-                    self.after(0, lambda n=name: self._on_login_success(n))
-                else:
-                    self.after(0, self._on_login_timeout)
-            except Exception as exc:
-                msg = str(exc)
-                self.after(0, self._confirm_login_btn.pack_forget)
-                self.after(0, lambda m=msg: self._on_login_error(m))
-
-        threading.Thread(target=worker, daemon=True).start()
+            self.after(0, lambda: self._login_status_var.set(
+                "Log in to Facebook in the browser window, "
+                "then click \"I'm Logged In\"."
+            ))
+            self.after(0, lambda: self._confirm_login_btn.pack(
+                side=tk.LEFT, padx=4, before=self._logout_btn
+            ))
+            ok = self._browser.wait_for_login(
+                timeout_s=600,
+                on_poll=lambda m: self.after(
+                    0, lambda msg=m: self._login_status_var.set(msg)
+                ),
+                confirm_event=self._login_confirmed,
+            )
+            self.after(0, self._confirm_login_btn.pack_forget)
+            if ok:
+                name = self._browser.logged_in_as
+                self.after(0, lambda n=name: self._on_login_success(n))
+            else:
+                self.after(0, self._on_login_timeout)
+        except Exception as exc:
+            msg = str(exc)
+            self.after(0, self._confirm_login_btn.pack_forget)
+            self.after(0, lambda m=msg: self._on_login_error(m))
 
     def _confirm_login(self):
         """User clicked 'I'm Logged In' — signal the waiting thread."""
@@ -460,17 +491,16 @@ class App(tk.Tk):
 
     def _clear_session(self):
         """Delete the saved login session so the user is prompted to log in again."""
-        if self._browser:
-            self._browser.clear_session()
-        else:
-            # Browser not open yet — delete the file directly
-            import os
-            from fb_browser import SESSION_FILE
-            try:
-                if os.path.exists(SESSION_FILE):
-                    os.remove(SESSION_FILE)
-            except Exception:
-                pass
+        def _do():
+            if self._browser:
+                self._browser.clear_session()
+            else:
+                try:
+                    if os.path.exists(SESSION_FILE):
+                        os.remove(SESSION_FILE)
+                except Exception:
+                    pass
+        self._worker.dispatch(_do)
         self._login_status_var.set(
             "Saved login cleared — click Open Browser & Log In to log in again."
         )
@@ -499,11 +529,7 @@ class App(tk.Tk):
         self._stop_event.clear()
         self._set_busy(True)
 
-        threading.Thread(
-            target=self._scan_worker,
-            args=(group_id, months),
-            daemon=True,
-        ).start()
+        self._worker.dispatch(self._scan_worker, group_id, months)
 
     def _scan_worker(self, group_id: str, months: int):
         def status(m):
@@ -688,11 +714,7 @@ class App(tk.Tk):
         self._stop_event.clear()
         self._progress_var.set(0)
 
-        threading.Thread(
-            target=self._remove_worker,
-            args=(group_id, members_to_remove, sched),
-            daemon=True,
-        ).start()
+        self._worker.dispatch(self._remove_worker, group_id, members_to_remove, sched)
 
     def _remove_worker(self, group_id: str, members: list, sched: dict):
         """
@@ -811,6 +833,9 @@ class App(tk.Tk):
 
     def _on_close(self):
         self._stop_event.set()
-        if self._browser:
-            threading.Thread(target=self._browser.close, daemon=True).start()
+        def _close():
+            if self._browser:
+                self._browser.close()
+        self._worker.dispatch(_close)
+        self._worker.stop()
         self.destroy()
