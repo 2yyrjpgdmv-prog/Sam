@@ -399,11 +399,19 @@ class App(tk.Tk):
                 if self._browser:
                     self._browser.close()
                 self._browser = FBBrowser()
-                self._browser.launch()
+                already_in = self._browser.launch()
+
+                if already_in:
+                    # Session still valid — skip login entirely
+                    name = self._browser.logged_in_as
+                    self.after(0, lambda n=name: self._on_login_success(n))
+                    return
+
+                # Need to log in — show the browser and wait
                 self.after(0, lambda: self._login_status_var.set(
-                    "Browser open — log in to Facebook, then click \"I'm Logged In\"."
+                    "Log in to Facebook in the browser window, "
+                    "then click \"I'm Logged In\"."
                 ))
-                # Show the manual-confirm button
                 self.after(0, lambda: self._confirm_login_btn.pack(
                     side=tk.LEFT, padx=4, before=self._logout_btn
                 ))

@@ -136,10 +136,11 @@ class FBBrowser:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def launch(self):
+    def launch(self) -> bool:
         """
-        Open a visible Chromium window.  If a saved session exists, load it
-        so the user is already logged in.  Otherwise go to the login page.
+        Open a visible Chromium window.
+        Returns True if the saved session is still valid (already logged in),
+        False if the user needs to log in.
         """
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(
@@ -168,10 +169,21 @@ class FBBrowser:
         )
 
         if os.path.exists(SESSION_FILE):
-            # Go straight to Facebook — session should already be active
             self._page.goto(f"{FB}/", wait_until="domcontentloaded")
+            time.sleep(2)
+            # Check immediately if session is still valid
+            url = self._page.url
+            _login_paths = ("/login", "/reg", "/recover", "login.php")
+            if "facebook.com" in url and not any(p in url for p in _login_paths):
+                self._grab_username()
+                self._save_session()
+                return True  # already logged in — no action needed
+            # Session expired — go to login page
+            self._page.goto(f"{FB}/login", wait_until="domcontentloaded")
         else:
             self._page.goto(f"{FB}/login", wait_until="domcontentloaded")
+
+        return False  # needs login
 
     def wait_for_login(
         self,
