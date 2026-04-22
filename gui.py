@@ -249,6 +249,10 @@ class App(tk.Tk):
                                GREEN, self._open_browser)
         self._login_btn.pack(side=tk.LEFT, padx=10)
 
+        self._logout_btn = _btn(inner, "Clear Saved Login", "#c0392b",
+                                self._clear_session)
+        self._logout_btn.pack(side=tk.LEFT, padx=4)
+
         self._login_status_var = tk.StringVar(
             value="Not logged in — click the button above to open a browser window.")
         tk.Label(inner, textvariable=self._login_status_var,
@@ -424,6 +428,24 @@ class App(tk.Tk):
             "Browser Error",
             f"{msg}\n\nMake sure you have run install.bat at least once.",
         )
+
+    def _clear_session(self):
+        """Delete the saved login session so the user is prompted to log in again."""
+        if self._browser:
+            self._browser.clear_session()
+        else:
+            # Browser not open yet — delete the file directly
+            import os
+            from fb_browser import SESSION_FILE
+            try:
+                if os.path.exists(SESSION_FILE):
+                    os.remove(SESSION_FILE)
+            except Exception:
+                pass
+        self._login_status_var.set(
+            "Saved login cleared — click Open Browser & Log In to log in again."
+        )
+        self._scan_btn.config(state=tk.DISABLED)
 
     # ── Scan flow ─────────────────────────────────────────────────────────────
 

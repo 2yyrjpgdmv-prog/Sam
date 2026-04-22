@@ -5,6 +5,7 @@ scrapes members/activity and automates member removal exactly as an admin
 would do it by hand.
 """
 
+import os
 import re
 import time
 import random
@@ -15,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Set
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
 FB = "https://www.facebook.com"
+SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session.json")
 
 
 # ── Stealth helpers ───────────────────────────────────────────────────────────
@@ -135,7 +137,10 @@ class FBBrowser:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def launch(self):
-        """Open a visible Chromium window and go to Facebook login."""
+        """
+        Open a visible Chromium window.  If a saved session exists, load it
+        so the user is already logged in.  Otherwise go to the login page.
+        """
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(
             headless=False,
@@ -144,7 +149,8 @@ class FBBrowser:
                 "--start-maximized",
             ],
         )
-        self._context = self._browser.new_context(
+
+        ctx_kwargs = dict(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -152,11 +158,20 @@ class FBBrowser:
             ),
             no_viewport=True,
         )
+        if os.path.exists(SESSION_FILE):
+            ctx_kwargs["storage_state"] = SESSION_FILE
+
+        self._context = self._browser.new_context(**ctx_kwargs)
         self._page = self._context.new_page()
         self._page.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
-        self._page.goto(f"{FB}/login", wait_until="domcontentloaded")
+
+        if os.path.exists(SESSION_FILE):
+            # Go straight to Facebook — session should already be active
+            self._page.goto(f"{FB}/", wait_until="domcontentloaded")
+        else:
+            self._page.goto(f"{FB}/login", wait_until="domcontentloaded")
 
     def wait_for_login(
         self,
@@ -180,6 +195,8 @@ class FBBrowser:
                         self.logged_in_as = el.inner_text().strip() if el else "Facebook User"
                     except Exception:
                         self.logged_in_as = "Facebook User"
+                    # Save session so next launch skips login
+                    self._save_session()
                     return True
             except Exception:
                 pass
@@ -188,7 +205,23 @@ class FBBrowser:
             time.sleep(1)
         return False
 
+    def _save_session(self):
+        try:
+            self._context.storage_state(path=SESSION_FILE)
+        except Exception:
+            pass
+
+    def clear_session(self):
+        """Delete the saved session file (forces a fresh login next time)."""
+        try:
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
+        except Exception:
+            pass
+
     def close(self):
+        # Save session before closing so it persists for next run
+        self._save_session()
         for obj in (self._page, self._context, self._browser, self._pw):
             try:
                 if obj:
