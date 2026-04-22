@@ -1,274 +1,228 @@
 """
-Main GUI — tkinter-based Windows desktop application.
-All Facebook API calls run on background threads; UI updates use .after().
+tkinter GUI for the Facebook Group Activity Scanner.
+The user logs in via a real visible browser window; all scraping and
+member-removal is driven through that same browser session.
 """
 
 import csv
 import threading
 import time
-import webbrowser
 from tkinter import filedialog, messagebox
 import tkinter as tk
 from tkinter import ttk
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
+import re
 
-from facebook_api import FacebookAPI, FacebookAPIError
-from scanner import ActivityScanner
+from fb_browser import FBBrowser, _group_id_from_input
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 FB_BLUE = "#1877f2"
 FB_DARK = "#0d47a1"
-GREEN = "#42b72a"
-RED = "#e53935"
-AMBER = "#f9a825"
-TEAL = "#00838f"
-LIGHT = "#f0f2f5"
-WHITE = "#ffffff"
+GREEN   = "#42b72a"
+RED     = "#e53935"
+AMBER   = "#f9a825"
+TEAL    = "#00838f"
+LIGHT   = "#f0f2f5"
+WHITE   = "#ffffff"
+FONT    = "Segoe UI"
 
-FONT = "Segoe UI"
 
-
-def _btn(parent, text, color, command, **kw):
+def _btn(parent, text, color, cmd, **kw):
     return tk.Button(
-        parent,
-        text=text,
-        command=command,
-        bg=color,
-        fg=WHITE,
-        font=(FONT, 9, "bold"),
-        padx=12,
-        pady=6,
-        relief=tk.FLAT,
-        cursor="hand2",
-        activebackground=color,
-        activeforeground=WHITE,
-        **kw,
+        parent, text=text, command=cmd,
+        bg=color, fg=WHITE, font=(FONT, 9, "bold"),
+        padx=12, pady=6, relief=tk.FLAT, cursor="hand2",
+        activebackground=color, activeforeground=WHITE, **kw,
     )
 
 
-# ── Help dialog ───────────────────────────────────────────────────────────────
-
-TOKEN_HELP = """How to get a Facebook Access Token
-══════════════════════════════════════
-
-OPTION A – Graph API Explorer (quickest)
-─────────────────────────────────────────
-1. Go to:  developers.facebook.com/tools/explorer
-2. Select (or create) a Facebook App.
-3. Click "Generate Access Token".
-4. Add these permissions if prompted:
-     • groups_access_member_info
-     • publish_to_groups   (needed to remove members)
-5. Copy the token and paste it here.
-
-Note: tokens from the Explorer expire in ~1 hour.
-For longer sessions generate a Long-Lived Token.
-
-OPTION B – Long-Lived Token
-─────────────────────────────
-Exchange a short-lived token via:
-  graph.facebook.com/oauth/access_token
-    ?grant_type=fb_exchange_token
-    &client_id=YOUR_APP_ID
-    &client_secret=YOUR_APP_SECRET
-    &fb_exchange_token=SHORT_LIVED_TOKEN
-
-IMPORTANT
-─────────
-• You must be an admin of the group you want to scan.
-• The Graph API only returns member activity that is
-  accessible to your app.  Some data may be limited
-  by Facebook's privacy settings.
-• Automated bulk-removal is governed by Facebook's
-  Platform Policy – use responsibly.
-"""
-
-
-class HelpDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("How to get your Access Token")
-        self.geometry("560x440")
-        self.resizable(False, False)
-        self.configure(bg=WHITE)
-        self.grab_set()
-
-        txt = tk.Text(self, wrap=tk.WORD, font=(FONT, 9), bg=WHITE, relief=tk.FLAT,
-                      padx=12, pady=10)
-        txt.insert(tk.END, TOKEN_HELP)
-        txt.config(state=tk.DISABLED)
-        txt.pack(fill=tk.BOTH, expand=True)
-
-        btn_row = tk.Frame(self, bg=WHITE)
-        btn_row.pack(fill=tk.X, pady=8)
-        _btn(btn_row, "Open Graph API Explorer",
-             FB_BLUE,
-             lambda: webbrowser.open("https://developers.facebook.com/tools/explorer"),
-             ).pack(side=tk.LEFT, padx=12)
-        _btn(btn_row, "Close", "#555", self.destroy).pack(side=tk.RIGHT, padx=12)
-
-
-# ── Main application ──────────────────────────────────────────────────────────
+# ── Application ───────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Facebook Group Activity Scanner")
-        self.geometry("980x720")
+        self.geometry("980x730")
         self.minsize(780, 560)
         self.configure(bg=FB_BLUE)
 
         self._results: List[Dict] = []
-        self._checked: set = set()          # user IDs marked for removal
+        self._checked: Set[str]   = set()
         self._stop_event = threading.Event()
-        self._token_visible = False
+        self._browser: Optional[FBBrowser] = None
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ── Build UI ──────────────────────────────────────────────────────────────
+    # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
         self._build_header()
         self._build_config()
-        self._build_buttons()
+        self._build_login_row()
+        self._build_action_row()
         self._build_progress()
         self._build_results()
 
     def _build_header(self):
-        frm = tk.Frame(self, bg=FB_BLUE)
-        frm.pack(fill=tk.X, padx=16, pady=(14, 4))
-        tk.Label(frm, text="Facebook Group Activity Scanner",
-                 font=(FONT, 18, "bold"), fg=WHITE, bg=FB_BLUE).pack(anchor="w")
-        tk.Label(frm, text="Identify inactive members and remove them in bulk",
+        f = tk.Frame(self, bg=FB_BLUE)
+        f.pack(fill=tk.X, padx=16, pady=(14, 4))
+        tk.Label(f, text="Facebook Group Activity Scanner",
+                 font=(FONT, 17, "bold"), fg=WHITE, bg=FB_BLUE).pack(anchor="w")
+        tk.Label(f, text="Log in with your own Facebook account — "
+                         "the app automates what you'd do manually as a group admin",
                  font=(FONT, 9), fg="#c8d8f8", bg=FB_BLUE).pack(anchor="w")
 
     def _build_config(self):
-        frm = tk.LabelFrame(self, text="  Configuration  ", padx=14, pady=10,
-                            bg=WHITE, fg="#222", font=(FONT, 10, "bold"),
-                            relief=tk.GROOVE)
-        frm.pack(fill=tk.X, padx=14, pady=6)
+        f = tk.LabelFrame(self, text="  Configuration  ", padx=14, pady=10,
+                          bg=WHITE, fg="#222", font=(FONT, 10, "bold"),
+                          relief=tk.GROOVE)
+        f.pack(fill=tk.X, padx=14, pady=6)
 
         lbl = dict(bg=WHITE, font=(FONT, 9), anchor="w", width=16)
         ent = dict(font=(FONT, 9))
 
-        # Access token
-        tk.Label(frm, text="Access Token:", **lbl).grid(row=0, column=0, sticky="w", pady=4)
-        self._token_var = tk.StringVar()
-        self._token_entry = tk.Entry(frm, textvariable=self._token_var,
-                                     show="•", width=64, **ent)
-        self._token_entry.grid(row=0, column=1, sticky="ew", padx=6)
-        tk.Button(frm, text="Show", command=self._toggle_token,
-                  bg=LIGHT, font=(FONT, 8), relief=tk.FLAT, width=5,
-                  cursor="hand2").grid(row=0, column=2, padx=4)
-        tk.Button(frm, text="?", command=lambda: HelpDialog(self),
-                  bg=FB_BLUE, fg=WHITE, font=(FONT, 8, "bold"), relief=tk.FLAT,
-                  width=3, cursor="hand2").grid(row=0, column=3, padx=2)
-
-        # Group ID
-        tk.Label(frm, text="Group ID:", **lbl).grid(row=1, column=0, sticky="w", pady=4)
+        tk.Label(f, text="Group URL or ID:", **lbl).grid(
+            row=0, column=0, sticky="w", pady=4)
         self._group_var = tk.StringVar()
-        tk.Entry(frm, textvariable=self._group_var, width=64, **ent).grid(
-            row=1, column=1, sticky="ew", padx=6)
-        tk.Label(frm, text="(numbers from the group URL)",
-                 font=(FONT, 8), fg="gray", bg=WHITE).grid(row=1, column=2,
-                                                            columnspan=2, sticky="w")
+        tk.Entry(f, textvariable=self._group_var, width=66, **ent).grid(
+            row=0, column=1, sticky="ew", padx=6)
+        tk.Label(f, text="e.g. facebook.com/groups/123… or just the ID",
+                 font=(FONT, 8), fg="gray", bg=WHITE).grid(
+            row=0, column=2, sticky="w", padx=4)
 
-        # Inactivity threshold
-        tk.Label(frm, text="Inactive after:", **lbl).grid(row=2, column=0, sticky="w", pady=4)
-        tf = tk.Frame(frm, bg=WHITE)
-        tf.grid(row=2, column=1, sticky="w", padx=6)
+        tk.Label(f, text="Inactive after:", **lbl).grid(
+            row=1, column=0, sticky="w", pady=4)
+        tf = tk.Frame(f, bg=WHITE)
+        tf.grid(row=1, column=1, sticky="w", padx=6)
         self._months_var = tk.IntVar(value=3)
         tk.Spinbox(tf, from_=1, to=24, textvariable=self._months_var,
                    width=4, font=(FONT, 9)).pack(side=tk.LEFT)
         tk.Label(tf, text=" months without posting, commenting, or reacting",
                  font=(FONT, 9), bg=WHITE, fg="#555").pack(side=tk.LEFT)
 
-        frm.columnconfigure(1, weight=1)
+        f.columnconfigure(1, weight=1)
 
-    def _build_buttons(self):
-        frm = tk.Frame(self, bg=FB_BLUE)
-        frm.pack(fill=tk.X, padx=14, pady=4)
+    def _build_login_row(self):
+        f = tk.Frame(self, bg=FB_DARK)
+        f.pack(fill=tk.X, padx=14, pady=(0, 4))
 
-        self._scan_btn = _btn(frm, "▶  Scan Group", GREEN, self._start_scan)
+        inner = tk.Frame(f, bg=FB_DARK)
+        inner.pack(fill=tk.X, padx=12, pady=8)
+
+        tk.Label(inner, text="Step 1 — Log in to Facebook:",
+                 font=(FONT, 9, "bold"), fg=WHITE, bg=FB_DARK).pack(side=tk.LEFT)
+
+        self._login_btn = _btn(inner, "Open Browser & Log In",
+                               GREEN, self._open_browser)
+        self._login_btn.pack(side=tk.LEFT, padx=10)
+
+        self._login_status_var = tk.StringVar(
+            value="Not logged in — click the button above to open a browser window.")
+        tk.Label(inner, textvariable=self._login_status_var,
+                 font=(FONT, 9), fg="#ffd", bg=FB_DARK).pack(side=tk.LEFT, padx=8)
+
+    def _build_action_row(self):
+        f = tk.Frame(self, bg=FB_BLUE)
+        f.pack(fill=tk.X, padx=14, pady=4)
+
+        tk.Label(f, text="Step 2 — Scan & manage:",
+                 font=(FONT, 9, "bold"), fg=WHITE, bg=FB_BLUE).pack(side=tk.LEFT, padx=(0, 8))
+
+        self._scan_btn = _btn(f, "▶  Scan Group", FB_DARK, self._start_scan,
+                              state=tk.DISABLED)
         self._scan_btn.pack(side=tk.LEFT)
 
-        self._stop_btn = _btn(frm, "⏹  Stop", AMBER, self._stop_scan, state=tk.DISABLED)
-        self._stop_btn.pack(side=tk.LEFT, padx=8)
+        self._stop_btn = _btn(f, "⏹  Stop", AMBER, self._stop_action,
+                              state=tk.DISABLED)
+        self._stop_btn.pack(side=tk.LEFT, padx=6)
 
-        self._sel_btn = _btn(frm, "Select All Inactive", "#555",
+        self._sel_btn = _btn(f, "Select All Inactive", "#555",
                              self._select_all_inactive, state=tk.DISABLED)
         self._sel_btn.pack(side=tk.LEFT)
 
-        self._desel_btn = _btn(frm, "Deselect All", "#777",
+        self._desel_btn = _btn(f, "Deselect All", "#777",
                                self._deselect_all, state=tk.DISABLED)
         self._desel_btn.pack(side=tk.LEFT, padx=6)
 
-        self._remove_btn = _btn(frm, "🗑  Remove Selected", RED,
+        self._remove_btn = _btn(f, "🗑  Remove Selected", RED,
                                 self._remove_selected, state=tk.DISABLED)
         self._remove_btn.pack(side=tk.LEFT)
 
-        self._export_btn = _btn(frm, "💾  Export CSV", TEAL,
+        self._export_btn = _btn(f, "💾  Export CSV", TEAL,
                                 self._export_csv, state=tk.DISABLED)
         self._export_btn.pack(side=tk.LEFT, padx=8)
 
     def _build_progress(self):
-        frm = tk.Frame(self, bg=FB_BLUE)
-        frm.pack(fill=tk.X, padx=14, pady=(4, 0))
+        f = tk.Frame(self, bg=FB_BLUE)
+        f.pack(fill=tk.X, padx=14, pady=(4, 0))
 
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("green.Horizontal.TProgressbar",
+        style.configure("g.Horizontal.TProgressbar",
                         troughcolor=FB_DARK, background=GREEN, thickness=10)
 
         self._progress_var = tk.DoubleVar()
-        ttk.Progressbar(frm, variable=self._progress_var, maximum=100,
-                        style="green.Horizontal.TProgressbar").pack(fill=tk.X)
+        ttk.Progressbar(f, variable=self._progress_var, maximum=100,
+                        style="g.Horizontal.TProgressbar").pack(fill=tk.X)
 
         self._status_var = tk.StringVar(
-            value="Ready — enter your access token and group ID, then click Scan Group.")
+            value="Open a browser and log in to Facebook to get started.")
         tk.Label(self, textvariable=self._status_var, bg=FB_BLUE, fg=WHITE,
-                 font=(FONT, 9), anchor="w").pack(fill=tk.X, padx=14, pady=(2, 6))
+                 font=(FONT, 9), anchor="w").pack(fill=tk.X, padx=14, pady=(2, 5))
 
     def _build_results(self):
-        frm = tk.LabelFrame(self, text="  Group Members  ", bg=WHITE, fg="#222",
-                            font=(FONT, 10, "bold"), relief=tk.GROOVE)
-        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+        f = tk.LabelFrame(self, text="  Group Members  ", bg=WHITE, fg="#222",
+                          font=(FONT, 10, "bold"), relief=tk.GROOVE)
+        f.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
 
-        # Filter / summary bar
-        bar = tk.Frame(frm, bg=WHITE)
+        # Filter bar
+        bar = tk.Frame(f, bg=WHITE)
         bar.pack(fill=tk.X, padx=8, pady=5)
 
         self._filter_var = tk.StringVar(value="all")
-        for label, val in [("All", "all"), ("Active ✓", "active"), ("Inactive ✗", "inactive")]:
-            tk.Radiobutton(bar, text=label, variable=self._filter_var, value=val,
-                           bg=WHITE, font=(FONT, 9), command=self._refresh_table,
+        for label, val in [("All", "all"), ("Active ✓", "active"),
+                           ("Inactive ✗", "inactive")]:
+            tk.Radiobutton(bar, text=label, variable=self._filter_var,
+                           value=val, bg=WHITE, font=(FONT, 9),
+                           command=self._refresh_table,
                            cursor="hand2").pack(side=tk.LEFT, padx=6)
 
         self._summary_var = tk.StringVar(value="")
         tk.Label(bar, textvariable=self._summary_var, bg=WHITE, fg="#555",
                  font=(FONT, 9)).pack(side=tk.RIGHT, padx=10)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=6, pady=(0, 2))
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=6, pady=(0, 2))
 
-        # Legend
-        legend = tk.Frame(frm, bg=WHITE)
+        # Colour legend
+        legend = tk.Frame(f, bg=WHITE)
         legend.pack(fill=tk.X, padx=8, pady=(0, 3))
-        for colour, label in [("#e8f5e9", "Active"), ("#ffebee", "Inactive"),
-                               ("#e3f2fd", "Admin"), ("#fff9c4", "Selected for removal")]:
-            box = tk.Frame(legend, bg=colour, width=14, height=14, relief=tk.GROOVE)
-            box.pack(side=tk.LEFT)
-            tk.Label(legend, text=f" {label}  ", bg=WHITE, font=(FONT, 8),
-                     fg="#444").pack(side=tk.LEFT)
+        for colour, label in [
+            ("#e8f5e9", "Active"),
+            ("#ffebee", "Inactive"),
+            ("#e3f2fd", "Admin (protected)"),
+            ("#fff9c4", "Selected for removal"),
+        ]:
+            tk.Frame(legend, bg=colour, width=14, height=14,
+                     relief=tk.GROOVE).pack(side=tk.LEFT)
+            tk.Label(legend, text=f" {label}  ", bg=WHITE,
+                     font=(FONT, 8), fg="#444").pack(side=tk.LEFT)
+
+        # Click-to-toggle checkbox column note
+        tk.Label(f, text="Click the ☑ column to toggle selection",
+                 bg=WHITE, fg="#888", font=(FONT, 8), anchor="e").pack(
+            fill=tk.X, padx=10)
 
         # Treeview
         cols = ("chk", "name", "uid", "status", "admin")
-        self._tree = ttk.Treeview(frm, columns=cols, show="headings", selectmode="none")
+        self._tree = ttk.Treeview(f, columns=cols, show="headings",
+                                  selectmode="none")
 
         for cid, heading, width, anchor, stretch in [
             ("chk",    "☑",         52,  "center", False),
-            ("name",   "Name",      230, "w",      True),
-            ("uid",    "User ID",   165, "center", False),
+            ("name",   "Name",      240, "w",      True),
+            ("uid",    "Profile ID", 170, "center", False),
             ("status", "Status",    115, "center", False),
             ("admin",  "Admin",     70,  "center", False),
         ]:
@@ -276,8 +230,8 @@ class App(tk.Tk):
             self._tree.column(cid, width=width, anchor=anchor,
                               stretch=tk.YES if stretch else tk.NO)
 
-        vsb = ttk.Scrollbar(frm, orient="vertical", command=self._tree.yview)
-        hsb = ttk.Scrollbar(frm, orient="horizontal", command=self._tree.xview)
+        vsb = ttk.Scrollbar(f, orient="vertical",   command=self._tree.yview)
+        hsb = ttk.Scrollbar(f, orient="horizontal", command=self._tree.xview)
         self._tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
@@ -290,104 +244,165 @@ class App(tk.Tk):
 
         self._tree.bind("<Button-1>", self._on_tree_click)
 
-    # ── Token visibility ──────────────────────────────────────────────────────
+    # ── Login flow ────────────────────────────────────────────────────────────
 
-    def _toggle_token(self):
-        self._token_visible = not self._token_visible
-        self._token_entry.config(show="" if self._token_visible else "•")
+    def _open_browser(self):
+        self._login_btn.config(state=tk.DISABLED)
+        self._login_status_var.set("Opening browser…")
 
-    # ── Scan ──────────────────────────────────────────────────────────────────
+        def worker():
+            try:
+                if self._browser:
+                    self._browser.close()
+                self._browser = FBBrowser()
+                self._browser.launch()
+                self.after(0, lambda: self._login_status_var.set(
+                    "Browser open — please log in to Facebook in the window that appeared."
+                ))
+                ok = self._browser.wait_for_login(
+                    timeout_s=300,
+                    on_poll=lambda m: self.after(
+                        0, lambda msg=m: self._login_status_var.set(msg)
+                    ),
+                )
+                if ok:
+                    name = self._browser.logged_in_as
+                    self.after(0, lambda: self._on_login_success(name))
+                else:
+                    self.after(0, self._on_login_timeout)
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda m=msg: self._on_login_error(m))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_login_success(self, name: str):
+        self._login_status_var.set(f"Logged in as: {name}  ✓")
+        self._login_btn.config(text="Re-open Browser", state=tk.NORMAL)
+        self._scan_btn.config(state=tk.NORMAL)
+        self._status_var.set(f"Logged in as {name}. Enter a group URL/ID and click Scan Group.")
+
+    def _on_login_timeout(self):
+        self._login_status_var.set("Login timed out. Try again.")
+        self._login_btn.config(state=tk.NORMAL)
+
+    def _on_login_error(self, msg: str):
+        self._login_status_var.set(f"Error: {msg}")
+        self._login_btn.config(state=tk.NORMAL)
+        messagebox.showerror(
+            "Browser Error",
+            f"{msg}\n\nMake sure you have run install.bat at least once.",
+        )
+
+    # ── Scan flow ─────────────────────────────────────────────────────────────
 
     def _start_scan(self):
-        token = self._token_var.get().strip()
-        group_id = self._group_var.get().strip()
+        group_raw = self._group_var.get().strip()
+        if not group_raw:
+            messagebox.showwarning("No Group",
+                                   "Enter a Facebook Group URL or ID first.")
+            return
+        if not self._browser:
+            messagebox.showwarning("Not Logged In",
+                                   "Open a browser and log in first.")
+            return
 
-        if not token:
-            messagebox.showwarning("Missing Token",
-                                   "Please enter your Facebook access token.\n"
-                                   "Click the ? button for instructions.")
-            return
-        if not group_id:
-            messagebox.showwarning("Missing Group ID",
-                                   "Please enter the Facebook Group ID (numbers only).")
-            return
+        group_id = _group_id_from_input(group_raw)
+        months = self._months_var.get()
 
         self._results.clear()
         self._checked.clear()
         self._refresh_table()
         self._progress_var.set(0)
         self._stop_event.clear()
-        self._set_scanning(True)
+        self._set_busy(True)
 
-        api = FacebookAPI(token)
-        scanner = ActivityScanner(api, group_id, self._months_var.get())
+        threading.Thread(
+            target=self._scan_worker,
+            args=(group_id, months),
+            daemon=True,
+        ).start()
 
-        threading.Thread(target=self._scan_worker, args=(scanner,), daemon=True).start()
+    def _scan_worker(self, group_id: str, months: int):
+        def status(m):
+            self.after(0, lambda msg=m: self._status_var.set(msg))
 
-    def _scan_worker(self, scanner: ActivityScanner):
         def progress(pct):
             self.after(0, lambda p=pct: self._progress_var.set(p))
 
-        def status(msg):
-            self.after(0, lambda m=msg: self._status_var.set(m))
-
         try:
-            results = scanner.scan(
-                on_progress=progress,
+            # ── Members ───────────────────────────────────────────────────────
+            status("Fetching group members…")
+            members = self._browser.scrape_members(
+                group_id,
                 on_status=status,
                 stop_event=self._stop_event,
             )
-            if results is None:
-                self.after(0, self._on_scan_stopped)
-            else:
-                self.after(0, lambda r=results: self._on_scan_complete(r))
-        except FacebookAPIError as exc:
-            msg = str(exc)
-            self.after(0, lambda m=msg: self._on_scan_error(m))
+            if self._stop_event.is_set():
+                self.after(0, self._on_stopped)
+                return
+            progress(40)
+            status(f"Found {len(members)} members. Now scanning the group feed…")
+
+            # ── Activity ──────────────────────────────────────────────────────
+            active_ids = self._browser.scrape_active_users(
+                group_id,
+                months,
+                on_status=status,
+                stop_event=self._stop_event,
+            )
+            if self._stop_event.is_set():
+                self.after(0, self._on_stopped)
+                return
+            progress(95)
+
+            # ── Merge ─────────────────────────────────────────────────────────
+            for m in members:
+                m["active"] = m["id"] in active_ids
+
+            # Inactive first, then alphabetical
+            members.sort(key=lambda r: (r["active"], r["name"].lower()))
+
+            progress(100)
+            self.after(0, lambda r=members: self._on_scan_complete(r))
+
         except Exception as exc:
             msg = str(exc)
-            self.after(0, lambda m=msg: self._on_scan_error(m))
+            self.after(0, lambda m=msg: self._on_error(m))
 
     def _on_scan_complete(self, results: list):
         self._results = results
-        self._set_scanning(False)
+        self._set_busy(False)
         self._sel_btn.config(state=tk.NORMAL)
         self._desel_btn.config(state=tk.NORMAL)
         self._export_btn.config(state=tk.NORMAL)
         self._refresh_table()
-        active = sum(1 for r in results if r["active"])
+        active   = sum(1 for r in results if r["active"])
         inactive = len(results) - active
         self._status_var.set(
             f"Scan complete — {len(results)} members: "
             f"{active} active, {inactive} inactive."
         )
 
-    def _on_scan_stopped(self):
-        self._set_scanning(False)
-        self._status_var.set("Scan stopped by user.")
+    def _on_stopped(self):
+        self._set_busy(False)
+        self._status_var.set("Stopped.")
 
-    def _on_scan_error(self, msg: str):
-        self._set_scanning(False)
+    def _on_error(self, msg: str):
+        self._set_busy(False)
         self._status_var.set(f"Error: {msg}")
-        messagebox.showerror(
-            "Scan Error",
-            f"{msg}\n\nCommon causes:\n"
-            "• Invalid or expired access token\n"
-            "• Missing groups_access_member_info permission\n"
-            "• You are not an admin of this group\n"
-            "• Wrong Group ID (use the numeric ID, not the URL slug)",
-        )
+        messagebox.showerror("Error", msg)
 
-    def _stop_scan(self):
+    def _stop_action(self):
         self._stop_event.set()
         self._stop_btn.config(state=tk.DISABLED)
-        self._status_var.set("Stopping scan…")
+        self._status_var.set("Stopping…")
 
-    def _set_scanning(self, scanning: bool):
-        self._scan_btn.config(state=tk.DISABLED if scanning else tk.NORMAL)
-        self._stop_btn.config(state=tk.NORMAL if scanning else tk.DISABLED)
+    def _set_busy(self, busy: bool):
+        self._scan_btn.config(state=tk.DISABLED if busy else tk.NORMAL)
+        self._stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
 
-    # ── Table helpers ─────────────────────────────────────────────────────────
+    # ── Table ─────────────────────────────────────────────────────────────────
 
     def _refresh_table(self):
         self._tree.delete(*self._tree.get_children())
@@ -396,14 +411,14 @@ class App(tk.Tk):
         shown = [
             r for r in self._results
             if fil == "all"
-            or (fil == "active" and r["active"])
+            or (fil == "active"   and r["active"])
             or (fil == "inactive" and not r["active"])
         ]
 
-        total = len(self._results)
-        active = sum(1 for r in self._results if r["active"])
+        total    = len(self._results)
+        active   = sum(1 for r in self._results if r["active"])
         inactive = total - active
-        sel = len(self._checked)
+        sel      = len(self._checked)
         self._summary_var.set(
             f"Total: {total}  |  Active: {active}  |  "
             f"Inactive: {inactive}  |  Selected: {sel}"
@@ -411,47 +426,44 @@ class App(tk.Tk):
 
         for r in shown:
             checked = r["id"] in self._checked
-            chk = "☑" if checked else "☐"
-            status_txt = "Active ✓" if r["active"] else "Inactive ✗"
-            admin_txt = "Yes" if r["admin"] else ""
-
-            if checked:
-                tag = "checked"
-            elif r["admin"]:
-                tag = "admin"
-            elif r["active"]:
-                tag = "active"
-            else:
-                tag = "inactive"
-
+            tag = (
+                "checked"  if checked       else
+                "admin"    if r["admin"]    else
+                "active"   if r["active"]   else
+                "inactive"
+            )
             self._tree.insert(
                 "", tk.END, iid=r["id"],
-                values=(chk, r["name"], r["id"], status_txt, admin_txt),
+                values=(
+                    "☑" if checked else "☐",
+                    r["name"],
+                    r["id"],
+                    "Active ✓" if r["active"] else "Inactive ✗",
+                    "Yes" if r["admin"] else "",
+                ),
                 tags=(tag,),
             )
 
-        # Only enable remove when non-admin inactive members are checked
         removable = [
             r for r in self._results
             if r["id"] in self._checked and not r["active"] and not r["admin"]
         ]
-        self._remove_btn.config(state=tk.NORMAL if removable else tk.DISABLED)
+        self._remove_btn.config(
+            state=tk.NORMAL if removable else tk.DISABLED
+        )
 
     def _on_tree_click(self, event):
         col = self._tree.identify_column(event.x)
         row = self._tree.identify_row(event.y)
         if not row or col != "#1":
             return
-
         member = next((r for r in self._results if r["id"] == row), None)
         if not member or member["admin"]:
             return
-
         if row in self._checked:
             self._checked.discard(row)
         else:
             self._checked.add(row)
-
         self._refresh_table()
 
     def _select_all_inactive(self):
@@ -467,39 +479,38 @@ class App(tk.Tk):
     # ── Remove ────────────────────────────────────────────────────────────────
 
     def _remove_selected(self):
-        token = self._token_var.get().strip()
-        group_id = self._group_var.get().strip()
-
         removable = [
             r for r in self._results
             if r["id"] in self._checked and not r["active"] and not r["admin"]
         ]
         if not removable:
-            messagebox.showinfo("Nothing to Remove",
-                                "No inactive non-admin members are selected.")
+            messagebox.showinfo("Nothing Selected",
+                                "Select some inactive non-admin members first.")
             return
+
+        group_raw = self._group_var.get().strip()
+        group_id  = _group_id_from_input(group_raw)
 
         if not messagebox.askyesno(
             "Confirm Removal",
-            f"Remove {len(removable)} inactive member(s) from the group?\n\n"
-            "This action cannot be undone.\n\nContinue?",
+            f"Remove {len(removable)} inactive member(s)?\n\n"
+            "This cannot be undone. Continue?",
             icon="warning",
         ):
             return
 
-        self._set_scanning(True)
+        self._set_busy(True)
         self._remove_btn.config(state=tk.DISABLED)
         self._stop_event.clear()
         self._progress_var.set(0)
 
-        api = FacebookAPI(token)
         threading.Thread(
             target=self._remove_worker,
-            args=(api, group_id, removable),
+            args=(group_id, removable),
             daemon=True,
         ).start()
 
-    def _remove_worker(self, api: FacebookAPI, group_id: str, members: list):
+    def _remove_worker(self, group_id: str, members: list):
         removed_ids = []
         failed = 0
         total = len(members)
@@ -508,30 +519,32 @@ class App(tk.Tk):
             if self._stop_event.is_set():
                 break
 
-            name = m["name"]
-            self.after(0, lambda n=name, i=i: self._status_var.set(
-                f"Removing {i + 1}/{total}: {n}…"
-            ))
+            def status(msg, name=m["name"]):
+                self.after(0, lambda s=msg: self._status_var.set(s))
 
-            try:
-                api.remove_member(group_id, m["id"])
+            ok = self._browser.remove_member(
+                group_id, m,
+                on_status=lambda msg: self.after(
+                    0, lambda s=msg: self._status_var.set(s)
+                ),
+            )
+            if ok:
                 removed_ids.append(m["id"])
-            except Exception:
+            else:
                 failed += 1
 
             pct = 100 * (i + 1) / total
             self.after(0, lambda p=pct: self._progress_var.set(p))
-            time.sleep(0.35)  # stay within rate limits
+            time.sleep(0.5)
 
-        self.after(0, lambda: self._on_remove_complete(removed_ids, failed))
+        self.after(0, lambda: self._on_remove_done(removed_ids, failed))
 
-    def _on_remove_complete(self, removed_ids: list, failed: int):
-        # Update results list on the main thread
+    def _on_remove_done(self, removed_ids: list, failed: int):
         removed_set = set(removed_ids)
-        self._results = [r for r in self._results if r["id"] not in removed_set]
+        self._results  = [r for r in self._results  if r["id"] not in removed_set]
         self._checked -= removed_set
 
-        self._set_scanning(False)
+        self._set_busy(False)
         self._refresh_table()
         self._status_var.set(
             f"Done — {len(removed_ids)} removed, {failed} failed."
@@ -539,12 +552,13 @@ class App(tk.Tk):
         if failed:
             messagebox.showwarning(
                 "Partial Failure",
-                f"{len(removed_ids)} members removed.\n"
-                f"{failed} could not be removed (permission error or rate limit).",
+                f"{len(removed_ids)} removed.\n"
+                f"{failed} could not be removed — Facebook may have changed "
+                f"its layout, or you may not have admin rights for those members.",
             )
         else:
-            messagebox.showinfo("Removal Complete",
-                                f"{len(removed_ids)} inactive members removed.")
+            messagebox.showinfo("Done",
+                                f"{len(removed_ids)} members removed successfully.")
 
     # ── Export ────────────────────────────────────────────────────────────────
 
@@ -552,20 +566,27 @@ class App(tk.Tk):
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            title="Save member report as CSV",
+            title="Save member report",
         )
         if not path:
             return
 
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=["name", "id", "status", "admin"])
-            writer.writeheader()
+            w = csv.DictWriter(fh, fieldnames=["name", "id", "status", "admin"])
+            w.writeheader()
             for r in self._results:
-                writer.writerow({
-                    "name": r["name"],
-                    "id": r["id"],
+                w.writerow({
+                    "name":   r["name"],
+                    "id":     r["id"],
                     "status": "Active" if r["active"] else "Inactive",
-                    "admin": "Yes" if r["admin"] else "No",
+                    "admin":  "Yes" if r["admin"] else "No",
                 })
-
         self._status_var.set(f"Exported {len(self._results)} members → {path}")
+
+    # ── Window close ──────────────────────────────────────────────────────────
+
+    def _on_close(self):
+        self._stop_event.set()
+        if self._browser:
+            threading.Thread(target=self._browser.close, daemon=True).start()
+        self.destroy()
