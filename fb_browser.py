@@ -298,6 +298,8 @@ class FBBrowser:
     def scrape_members(
         self,
         group_id: str,
+        active_set: Optional[Set[str]] = None,
+        inactive_limit: int = 0,
         on_status: Optional[Callable[[str], None]] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> List[Dict]:
@@ -315,8 +317,10 @@ class FBBrowser:
 
         seen: Set[str] = set()
         members: List[Dict] = []
+        inactive_count = 0
 
         def collect() -> bool:
+            nonlocal inactive_count
             for link in self._page.query_selector_all("a[href*='facebook.com/']"):
                 try:
                     href = link.get_attribute("href") or ""
@@ -335,31 +339,64 @@ class FBBrowser:
                         continue
 
                     is_admin = False
+                    joined_days = None
+                    joined_text = ""
                     try:
-                        ctx_html = self._page.evaluate(
-                            """el=>{let p=el;for(let i=0;i<7;i++){
-                                if(!p.parentElement)break;p=p.parentElement;}
-                                return p.innerHTML;}""",
+                        ctx_text = self._page.evaluate(
+                            """el => {
+                                let p = el;
+                                for (let i = 0; i < 8; i++) {
+                                    if (!p.parentElement) break;
+                                    p = p.parentElement;
+                                }
+                                return p.innerText;
+                            }""",
                             link,
                         )
                         is_admin = bool(
-                            re.search(r"\badmin\b|\bmoderator\b", ctx_html, re.I)
+                            re.search(r"\badmin\b|\bmoderator\b", ctx_text, re.I)
                         )
+                        # Try "Joined X days/weeks/months/years ago"
+                        mj = re.search(
+                            r"joined\s+(\d+)\s+(day|week|month|year)s?\s+ago",
+                            ctx_text, re.I,
+                        )
+                        if not mj:
+                            mj = re.search(
+                                r"member\s+for\s+(\d+)\s+(day|week|month|year)s?",
+                                ctx_text, re.I,
+                            )
+                        if mj:
+                            n, unit = int(mj.group(1)), mj.group(2).lower()
+                            joined_days = n * {"day": 1, "week": 7, "month": 30, "year": 365}[unit]
+                            joined_text = mj.group(0)
                     except Exception:
                         pass
 
+                    is_new = joined_days is not None and joined_days < 30
+                    is_active = is_new or (active_set is not None and uid in active_set)
+
                     members.append({
-                        "id": uid,
-                        "name": name,
-                        "href": href.split("?")[0],
-                        "admin": is_admin,
-                        "active": False,
+                        "id":          uid,
+                        "name":        name,
+                        "href":        href.split("?")[0],
+                        "admin":       is_admin,
+                        "active":      is_active,
+                        "new_member":  is_new,
+                        "joined_text": joined_text,
                     })
+
+                    if not is_active and not is_admin:
+                        inactive_count += 1
+
                 except Exception:
                     continue
 
-            status(f"Found {len(members)} members — scrolling for more…")
-            return False
+            status(
+                f"Found {len(members)} members "
+                f"({inactive_count} inactive so far) — scrolling…"
+            )
+            return inactive_limit > 0 and inactive_count >= inactive_limit
 
         self._scroll_load(
             collect,
@@ -376,7 +413,7 @@ class FBBrowser:
     def scrape_active_users(
         self,
         group_id: str,
-        months: int,
+        days: int,
         on_status: Optional[Callable[[str], None]] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> Set[str]:
@@ -384,7 +421,7 @@ class FBBrowser:
             if on_status:
                 on_status(m)
 
-        cutoff = datetime.now() - timedelta(days=months * 30)
+        cutoff = datetime.now() - timedelta(days=days)
         active: Set[str] = set()
         past_cutoff = False
         articles_seen = 0
