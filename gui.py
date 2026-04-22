@@ -181,6 +181,8 @@ class BrowserWorker:
         self._thread.start()
 
     def _run(self):
+        import asyncio
+        asyncio.set_event_loop(asyncio.new_event_loop())
         while True:
             item = self._queue.get()
             if item is None:

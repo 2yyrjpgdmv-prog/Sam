@@ -121,7 +121,14 @@ def _group_id_from_input(raw: str) -> str:
     """Accept a full URL or bare ID/slug and return just the group identifier."""
     raw = raw.strip().rstrip("/")
     m = re.search(r"facebook\.com/groups/([^/?#]+)", raw)
-    return m.group(1) if m else raw
+    if m:
+        return m.group(1)
+    # Share links (facebook.com/share/g/TOKEN) need browser resolution;
+    # prefix so FBBrowser knows to follow the redirect first.
+    m = re.search(r"facebook\.com/share/g/([^/?#]+)", raw)
+    if m:
+        return "SHARE:" + m.group(1)
+    return raw
 
 
 # ── Browser controller ────────────────────────────────────────────────────────
@@ -260,6 +267,22 @@ class FBBrowser:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _resolve_group(
+        self,
+        group_id: str,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Follow a share link redirect and return the real group ID."""
+        if not group_id.startswith("SHARE:"):
+            return group_id
+        token = group_id[6:]
+        if on_status:
+            on_status("Resolving share link — please wait…")
+        self._page.goto(f"{FB}/share/g/{token}", wait_until="domcontentloaded")
+        time.sleep(2.5)
+        m = re.search(r"facebook\.com/groups/([^/?#]+)", self._page.url)
+        return m.group(1) if m else token
+
     def _dismiss(self):
         try:
             self._page.keyboard.press("Escape")
@@ -305,6 +328,7 @@ class FBBrowser:
             if on_status:
                 on_status(m)
 
+        group_id = self._resolve_group(group_id, on_status)
         status("Opening group members page…")
         self._page.goto(
             f"{FB}/groups/{group_id}/members",
@@ -384,6 +408,7 @@ class FBBrowser:
             if on_status:
                 on_status(m)
 
+        group_id = self._resolve_group(group_id, on_status)
         cutoff = datetime.now() - timedelta(days=months * 30)
         active: Set[str] = set()
         past_cutoff = False
@@ -455,6 +480,7 @@ class FBBrowser:
             if on_status:
                 on_status(m)
 
+        group_id = self._resolve_group(group_id, on_status)
         name = member["name"]
         uid  = member["id"]
         status(f"Removing {name}…")
