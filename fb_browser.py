@@ -7,6 +7,7 @@ would do it by hand.
 
 import re
 import time
+import random
 import threading
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Set
@@ -16,22 +17,65 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 FB = "https://www.facebook.com"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Stealth helpers ───────────────────────────────────────────────────────────
+
+def _delay(lo: float = 0.8, hi: float = 2.2):
+    """Sleep for a random duration to mimic human reaction time."""
+    time.sleep(random.uniform(lo, hi))
+
+
+def _scroll(page: Page, base_px: int = 900):
+    """Scroll by a randomised amount — humans don't scroll in exact increments."""
+    amount = base_px + random.randint(-250, 350)
+    # Occasionally do a tiny scroll-back before continuing (human habit)
+    if random.random() < 0.12:
+        page.evaluate(f"window.scrollBy(0, -{random.randint(30, 120)})")
+        time.sleep(random.uniform(0.15, 0.4))
+    page.evaluate(f"window.scrollBy(0, {amount})")
+
+
+def _mouse_to(page: Page, element):
+    """
+    Move the mouse to an element with slight positional jitter and a
+    micro-pause mid-travel so the trajectory looks human.
+    """
+    try:
+        box = element.bounding_box()
+        if not box:
+            return
+        tx = box["x"] + box["width"]  * random.uniform(0.25, 0.75)
+        ty = box["y"] + box["height"] * random.uniform(0.25, 0.75)
+        # Move to a nearby point first
+        page.mouse.move(
+            tx + random.randint(-18, 18),
+            ty + random.randint(-18, 18),
+        )
+        time.sleep(random.uniform(0.05, 0.18))
+        page.mouse.move(tx, ty)
+        time.sleep(random.uniform(0.05, 0.12))
+    except Exception:
+        pass
+
+
+def _click(page: Page, element):
+    """Human-like click: move mouse to element, brief hover, then click."""
+    _mouse_to(page, element)
+    element.click()
+
+
+# ── URL helpers ───────────────────────────────────────────────────────────────
 
 def _extract_uid(href: str) -> str:
     """Return a stable user identifier from a Facebook profile URL."""
     if not href:
         return ""
     href = href.split("#")[0].rstrip("/")
-    # /groups/xxx/user/123456
     m = re.search(r"/user/(\d+)", href)
     if m:
         return m.group(1)
-    # profile.php?id=123456
     m = re.search(r"[?&]id=(\d+)", href)
     if m:
         return m.group(1)
-    # facebook.com/username  (strip query string first)
     clean = href.split("?")[0]
     m = re.search(r"facebook\.com/([^/]+)$", clean)
     if m:
@@ -47,10 +91,7 @@ def _extract_uid(href: str) -> str:
 
 
 def _parse_relative_time(text: str) -> Optional[datetime]:
-    """
-    Convert Facebook relative timestamps ("3 hours ago", "2w", "Just now", …)
-    into a datetime.  Returns None when the format is unrecognised.
-    """
+    """Convert Facebook relative timestamps into a datetime."""
     if not text:
         return None
     now = datetime.now()
@@ -122,7 +163,6 @@ class FBBrowser:
         timeout_s: int = 300,
         on_poll: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        """Block until the user finishes logging in (or timeout)."""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
@@ -132,7 +172,6 @@ class FBBrowser:
                     and "login" not in url
                     and "checkpoint" not in url
                 ):
-                    # Try to grab the user's name from the nav bar
                     try:
                         el = self._page.query_selector(
                             '[aria-label="Your profile"], '
@@ -165,20 +204,17 @@ class FBBrowser:
             self._page.keyboard.press("Escape")
         except Exception:
             pass
-        time.sleep(0.4)
+        time.sleep(random.uniform(0.3, 0.6))
 
     def _scroll_load(
         self,
         on_each: Callable[[], bool],
         scroll_px: int = 900,
-        delay: float = 1.8,
+        delay_lo: float = 1.4,
+        delay_hi: float = 2.6,
         max_no_new: int = 5,
         stop_event: Optional[threading.Event] = None,
     ):
-        """
-        Scroll down the current page repeatedly, calling on_each() after each
-        scroll.  Stops when on_each returns True or content stops loading.
-        """
         no_new = 0
         prev_h = 0
         while not (stop_event and stop_event.is_set()):
@@ -193,8 +229,8 @@ class FBBrowser:
             else:
                 no_new = 0
             prev_h = h
-            self._page.evaluate(f"window.scrollBy(0,{scroll_px})")
-            time.sleep(delay)
+            _scroll(self._page, scroll_px)
+            _delay(delay_lo, delay_hi)
 
     # ── Scrape members ────────────────────────────────────────────────────────
 
@@ -213,7 +249,7 @@ class FBBrowser:
             f"{FB}/groups/{group_id}/members",
             wait_until="domcontentloaded",
         )
-        time.sleep(3)
+        _delay(2.5, 4.0)
         self._dismiss()
 
         seen: Set[str] = set()
@@ -237,7 +273,6 @@ class FBBrowser:
                     if len(name) < 2:
                         continue
 
-                    # Detect admin badge in the surrounding HTML
                     is_admin = False
                     try:
                         ctx_html = self._page.evaluate(
@@ -252,23 +287,26 @@ class FBBrowser:
                     except Exception:
                         pass
 
-                    members.append(
-                        {
-                            "id": uid,
-                            "name": name,
-                            "href": href.split("?")[0],
-                            "admin": is_admin,
-                            "active": False,
-                        }
-                    )
+                    members.append({
+                        "id": uid,
+                        "name": name,
+                        "href": href.split("?")[0],
+                        "admin": is_admin,
+                        "active": False,
+                    })
                 except Exception:
                     continue
 
-            status(f"Found {len(members)} members — keep scrolling…")
-            return False  # never stop early; let scroll_load decide
+            status(f"Found {len(members)} members — scrolling for more…")
+            return False
 
         self._scroll_load(
-            collect, scroll_px=800, delay=1.5, max_no_new=5, stop_event=stop_event
+            collect,
+            scroll_px=800,
+            delay_lo=1.3,
+            delay_hi=2.4,
+            max_no_new=5,
+            stop_event=stop_event,
         )
         return members
 
@@ -295,7 +333,7 @@ class FBBrowser:
             f"{FB}/groups/{group_id}",
             wait_until="domcontentloaded",
         )
-        time.sleep(3)
+        _delay(2.5, 4.0)
         self._dismiss()
 
         def collect() -> bool:
@@ -305,7 +343,6 @@ class FBBrowser:
 
             for article in articles:
                 try:
-                    # ── Timestamp check ────────────────────────────────────
                     for ts_sel in ["abbr", "a[href*='?__cft__']", "span[id]"]:
                         for ts_el in article.query_selector_all(ts_sel):
                             raw = (
@@ -317,9 +354,8 @@ class FBBrowser:
                             dt = _parse_relative_time(raw)
                             if dt and dt < cutoff:
                                 past_cutoff = True
-                                return True  # stop scrolling
+                                return True
 
-                    # ── Collect all profile links in this post ─────────────
                     for link in article.query_selector_all("a[href*='facebook.com/']"):
                         href = link.get_attribute("href") or ""
                         if "/groups/" in href:
@@ -337,7 +373,12 @@ class FBBrowser:
             return past_cutoff
 
         self._scroll_load(
-            collect, scroll_px=1200, delay=2.0, max_no_new=5, stop_event=stop_event
+            collect,
+            scroll_px=1100,
+            delay_lo=1.8,
+            delay_hi=3.0,
+            max_no_new=5,
+            stop_event=stop_event,
         )
         return active
 
@@ -354,7 +395,7 @@ class FBBrowser:
                 on_status(m)
 
         name = member["name"]
-        uid = member["id"]
+        uid  = member["id"]
         status(f"Removing {name}…")
 
         try:
@@ -362,10 +403,10 @@ class FBBrowser:
                 f"{FB}/groups/{group_id}/members",
                 wait_until="domcontentloaded",
             )
-            time.sleep(2)
+            _delay(1.8, 3.2)
             self._dismiss()
 
-            # Find this member's profile link on the page
+            # Locate the member's link
             target = None
             for link in self._page.query_selector_all("a[href*='facebook.com/']"):
                 try:
@@ -377,7 +418,6 @@ class FBBrowser:
                     continue
 
             if not target:
-                # Fall back: find by displayed name
                 try:
                     target = self._page.get_by_text(name, exact=True).first
                 except Exception:
@@ -387,13 +427,13 @@ class FBBrowser:
                 status(f"Could not locate {name} on members page.")
                 return False
 
-            # Scroll the element into view and hover to reveal the options button
+            # Scroll member into view, hover with mouse movement
             target.scroll_into_view_if_needed()
-            time.sleep(0.5)
-            target.hover()
-            time.sleep(0.8)
+            _delay(0.4, 0.9)
+            _mouse_to(self._page, target)
+            _delay(0.5, 1.0)
 
-            # Look for a nearby popup/menu trigger
+            # Find and click the nearby options/menu button
             menu_clicked = False
             for selector in [
                 '[aria-haspopup="menu"]',
@@ -404,8 +444,10 @@ class FBBrowser:
                 try:
                     btns = self._page.query_selector_all(selector)
                     if btns:
+                        _mouse_to(self._page, btns[-1])
+                        _delay(0.2, 0.5)
                         btns[-1].click()
-                        time.sleep(1)
+                        _delay(0.8, 1.4)
                         menu_clicked = True
                         break
                 except Exception:
@@ -424,8 +466,11 @@ class FBBrowser:
                 "Remove",
             ]:
                 try:
-                    self._page.get_by_text(label, exact=True).first.click(timeout=2000)
-                    time.sleep(1)
+                    el = self._page.get_by_text(label, exact=True).first
+                    _mouse_to(self._page, el)
+                    _delay(0.2, 0.5)
+                    el.click(timeout=2000)
+                    _delay(0.8, 1.5)
                     removed = True
                     break
                 except PWTimeout:
@@ -434,18 +479,21 @@ class FBBrowser:
             if not removed:
                 return False
 
-            # Confirm if a dialog appears
+            # Confirm dialog if it appears
             for label in ["Remove", "Confirm", "Yes"]:
                 try:
-                    self._page.locator(
+                    el = self._page.locator(
                         f'[role="dialog"] >> text="{label}"'
-                    ).first.click(timeout=2000)
-                    time.sleep(1)
+                    ).first
+                    _mouse_to(self._page, el)
+                    _delay(0.2, 0.4)
+                    el.click(timeout=2000)
+                    _delay(0.8, 1.5)
                     break
                 except PWTimeout:
                     continue
 
-            time.sleep(1.5)
+            _delay(1.0, 2.0)
             return True
 
         except Exception as exc:

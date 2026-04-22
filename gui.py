@@ -5,6 +5,7 @@ member-removal is driven through that same browser session.
 """
 
 import csv
+import random
 import threading
 import time
 from tkinter import filedialog, messagebox
@@ -35,6 +36,136 @@ def _btn(parent, text, color, cmd, **kw):
         padx=12, pady=6, relief=tk.FLAT, cursor="hand2",
         activebackground=color, activeforeground=WHITE, **kw,
     )
+
+
+# ── Removal schedule dialog ───────────────────────────────────────────────────
+
+class RemovalScheduleDialog(tk.Toplevel):
+    """
+    Lets the user control how many members to remove and at what pace,
+    so the activity looks natural to Facebook.
+    """
+    result = None  # set to dict on confirm, None on cancel
+
+    def __init__(self, parent, total_selected: int):
+        super().__init__(parent)
+        self.title("Removal Schedule")
+        self.geometry("460x340")
+        self.resizable(False, False)
+        self.configure(bg=WHITE)
+        self.grab_set()
+        self.result = None
+        self._total = total_selected
+        self._build(total_selected)
+
+    def _build(self, total: int):
+        pad = dict(padx=16, pady=6)
+
+        tk.Label(self, text="Removal Schedule",
+                 font=(FONT, 13, "bold"), bg=WHITE, fg="#222").pack(pady=(14, 2))
+        tk.Label(self,
+                 text=f"{total} inactive member(s) selected.\n"
+                      "Set the pace below so the removals look natural.",
+                 font=(FONT, 9), bg=WHITE, fg="#555", justify="center").pack()
+
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=14, pady=10)
+
+        frm = tk.Frame(self, bg=WHITE)
+        frm.pack(fill=tk.X, **pad)
+
+        lbl = dict(bg=WHITE, font=(FONT, 9), anchor="w", width=28)
+        spn = dict(font=(FONT, 9), width=6)
+
+        # Session limit
+        tk.Label(frm, text="Remove at most this many today:", **lbl).grid(
+            row=0, column=0, sticky="w", pady=4)
+        self._limit_var = tk.IntVar(value=min(total, 50))
+        tk.Spinbox(frm, from_=1, to=total, textvariable=self._limit_var, **spn).grid(
+            row=0, column=1, sticky="w", padx=8)
+        tk.Label(frm, text="members", bg=WHITE, font=(FONT, 9)).grid(
+            row=0, column=2, sticky="w")
+
+        # Batch size
+        tk.Label(frm, text="Remove in batches of:", **lbl).grid(
+            row=1, column=0, sticky="w", pady=4)
+        self._batch_var = tk.IntVar(value=10)
+        tk.Spinbox(frm, from_=1, to=50, textvariable=self._batch_var, **spn).grid(
+            row=1, column=1, sticky="w", padx=8)
+        tk.Label(frm, text="members per batch", bg=WHITE, font=(FONT, 9)).grid(
+            row=1, column=2, sticky="w")
+
+        # Break duration
+        tk.Label(frm, text="Take a break between batches of:", **lbl).grid(
+            row=2, column=0, sticky="w", pady=4)
+        self._break_var = tk.IntVar(value=10)
+        tk.Spinbox(frm, from_=1, to=120, textvariable=self._break_var, **spn).grid(
+            row=2, column=1, sticky="w", padx=8)
+        tk.Label(frm, text="minutes", bg=WHITE, font=(FONT, 9)).grid(
+            row=2, column=2, sticky="w")
+
+        # Delay between individual removals
+        tk.Label(frm, text="Delay between each removal:", **lbl).grid(
+            row=3, column=0, sticky="w", pady=4)
+        self._delay_var = tk.IntVar(value=30)
+        tk.Spinbox(frm, from_=5, to=300, textvariable=self._delay_var, **spn).grid(
+            row=3, column=1, sticky="w", padx=8)
+        tk.Label(frm, text="seconds (± random jitter)", bg=WHITE, font=(FONT, 9)).grid(
+            row=3, column=2, sticky="w")
+
+        # Estimate label
+        self._est_var = tk.StringVar()
+        tk.Label(self, textvariable=self._est_var, bg=WHITE, fg="#1877f2",
+                 font=(FONT, 9, "italic")).pack(pady=(4, 0))
+
+        self._limit_var.trace_add("write", self._update_estimate)
+        self._batch_var.trace_add("write", self._update_estimate)
+        self._break_var.trace_add("write", self._update_estimate)
+        self._delay_var.trace_add("write", self._update_estimate)
+        self._update_estimate()
+
+        # Buttons
+        btn_row = tk.Frame(self, bg=WHITE)
+        btn_row.pack(fill=tk.X, pady=12)
+        _btn(btn_row, "Start Removing", RED, self._confirm).pack(
+            side=tk.RIGHT, padx=14)
+        _btn(btn_row, "Cancel", "#777", self.destroy).pack(
+            side=tk.RIGHT, padx=4)
+
+    def _update_estimate(self, *_):
+        try:
+            limit   = max(1, self._limit_var.get())
+            batch   = max(1, self._batch_var.get())
+            brk     = max(1, self._break_var.get())
+            delay_s = max(1, self._delay_var.get())
+
+            batches   = max(1, -(-limit // batch))          # ceiling division
+            breaks    = max(0, batches - 1)
+            total_s   = limit * delay_s + breaks * brk * 60
+            h, rem    = divmod(total_s, 3600)
+            m         = rem // 60
+            if h:
+                eta = f"~{h}h {m}m"
+            else:
+                eta = f"~{m}m"
+            self._est_var.set(
+                f"Estimated time: {eta}  "
+                f"({batches} batch{'es' if batches > 1 else ''}, "
+                f"{breaks} break{'s' if breaks != 1 else ''})"
+            )
+        except Exception:
+            self._est_var.set("")
+
+    def _confirm(self):
+        try:
+            self.result = {
+                "limit":    max(1, self._limit_var.get()),
+                "batch":    max(1, self._batch_var.get()),
+                "break_s":  max(1, self._break_var.get()) * 60,
+                "delay_s":  max(1, self._delay_var.get()),
+            }
+        except Exception:
+            return
+        self.destroy()
 
 
 # ── Application ───────────────────────────────────────────────────────────────
@@ -491,13 +622,15 @@ class App(tk.Tk):
         group_raw = self._group_var.get().strip()
         group_id  = _group_id_from_input(group_raw)
 
-        if not messagebox.askyesno(
-            "Confirm Removal",
-            f"Remove {len(removable)} inactive member(s)?\n\n"
-            "This cannot be undone. Continue?",
-            icon="warning",
-        ):
-            return
+        # Show schedule dialog — user picks pace
+        dlg = RemovalScheduleDialog(self, total_selected=len(removable))
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return  # cancelled
+
+        sched = dlg.result
+        # Cap the list to session limit
+        members_to_remove = removable[: sched["limit"]]
 
         self._set_busy(True)
         self._remove_btn.config(state=tk.DISABLED)
@@ -506,36 +639,76 @@ class App(tk.Tk):
 
         threading.Thread(
             target=self._remove_worker,
-            args=(group_id, removable),
+            args=(group_id, members_to_remove, sched),
             daemon=True,
         ).start()
 
-    def _remove_worker(self, group_id: str, members: list):
-        removed_ids = []
-        failed = 0
-        total = len(members)
+    def _remove_worker(self, group_id: str, members: list, sched: dict):
+        """
+        Remove members in batches.  Between batches, pause for sched['break_s']
+        seconds while showing a live countdown.  Between individual removals,
+        sleep sched['delay_s'] ± 30% random jitter.
+        """
+        batch_size = sched["batch"]
+        break_s    = sched["break_s"]
+        delay_s    = sched["delay_s"]
+        total      = len(members)
 
-        for i, m in enumerate(members):
+        removed_ids: list = []
+        failed = 0
+        done = 0
+
+        def set_status(msg):
+            self.after(0, lambda s=msg: self._status_var.set(s))
+
+        def set_progress(pct):
+            self.after(0, lambda p=pct: self._progress_var.set(p))
+
+        batches = [members[i: i + batch_size]
+                   for i in range(0, total, batch_size)]
+
+        for b_idx, batch in enumerate(batches):
             if self._stop_event.is_set():
                 break
 
-            def status(msg, name=m["name"]):
-                self.after(0, lambda s=msg: self._status_var.set(s))
-
-            ok = self._browser.remove_member(
-                group_id, m,
-                on_status=lambda msg: self.after(
-                    0, lambda s=msg: self._status_var.set(s)
-                ),
+            set_status(
+                f"Batch {b_idx + 1}/{len(batches)} — "
+                f"removing {len(batch)} member(s)…"
             )
-            if ok:
-                removed_ids.append(m["id"])
-            else:
-                failed += 1
 
-            pct = 100 * (i + 1) / total
-            self.after(0, lambda p=pct: self._progress_var.set(p))
-            time.sleep(0.5)
+            for m in batch:
+                if self._stop_event.is_set():
+                    break
+
+                ok = self._browser.remove_member(
+                    group_id, m,
+                    on_status=set_status,
+                )
+                if ok:
+                    removed_ids.append(m["id"])
+                else:
+                    failed += 1
+
+                done += 1
+                set_progress(100 * done / total)
+
+                # Per-removal delay with ±30 % jitter
+                if not self._stop_event.is_set():
+                    jitter = delay_s * random.uniform(0.7, 1.3)
+                    time.sleep(jitter)
+
+            # Break between batches (skip after the last one)
+            if b_idx < len(batches) - 1 and not self._stop_event.is_set():
+                for remaining in range(break_s, 0, -1):
+                    if self._stop_event.is_set():
+                        break
+                    m_left, s_left = divmod(remaining, 60)
+                    set_status(
+                        f"Break after batch {b_idx + 1}/{len(batches)} — "
+                        f"resuming in {m_left}:{s_left:02d}…  "
+                        f"({done}/{total} removed so far)"
+                    )
+                    time.sleep(1)
 
         self.after(0, lambda: self._on_remove_done(removed_ids, failed))
 
