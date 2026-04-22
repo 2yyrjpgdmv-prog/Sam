@@ -181,6 +181,7 @@ class App(tk.Tk):
         self._results: List[Dict] = []
         self._checked: Set[str]   = set()
         self._stop_event = threading.Event()
+        self._login_confirmed = threading.Event()
         self._browser: Optional[FBBrowser] = None
 
         self._build_ui()
@@ -248,6 +249,13 @@ class App(tk.Tk):
         self._login_btn = _btn(inner, "Open Browser & Log In",
                                GREEN, self._open_browser)
         self._login_btn.pack(side=tk.LEFT, padx=10)
+
+        # Shown while waiting — lets the user confirm login manually
+        self._confirm_login_btn = _btn(inner, "I'm Logged In ✓", "#27ae60",
+                                       self._confirm_login)
+        # hidden until browser is waiting
+        self._confirm_login_btn.pack(side=tk.LEFT, padx=4)
+        self._confirm_login_btn.pack_forget()
 
         self._logout_btn = _btn(inner, "Clear Saved Login", "#c0392b",
                                 self._clear_session)
@@ -383,6 +391,7 @@ class App(tk.Tk):
 
     def _open_browser(self):
         self._login_btn.config(state=tk.DISABLED)
+        self._login_confirmed.clear()
         self._login_status_var.set("Opening browser…")
 
         def worker():
@@ -392,24 +401,36 @@ class App(tk.Tk):
                 self._browser = FBBrowser()
                 self._browser.launch()
                 self.after(0, lambda: self._login_status_var.set(
-                    "Browser open — please log in to Facebook in the window that appeared."
+                    "Browser open — log in to Facebook, then click \"I'm Logged In\"."
+                ))
+                # Show the manual-confirm button
+                self.after(0, lambda: self._confirm_login_btn.pack(
+                    side=tk.LEFT, padx=4, before=self._logout_btn
                 ))
                 ok = self._browser.wait_for_login(
-                    timeout_s=300,
+                    timeout_s=600,
                     on_poll=lambda m: self.after(
                         0, lambda msg=m: self._login_status_var.set(msg)
                     ),
+                    confirm_event=self._login_confirmed,
                 )
+                self.after(0, self._confirm_login_btn.pack_forget)
                 if ok:
                     name = self._browser.logged_in_as
-                    self.after(0, lambda: self._on_login_success(name))
+                    self.after(0, lambda n=name: self._on_login_success(n))
                 else:
                     self.after(0, self._on_login_timeout)
             except Exception as exc:
                 msg = str(exc)
+                self.after(0, self._confirm_login_btn.pack_forget)
                 self.after(0, lambda m=msg: self._on_login_error(m))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _confirm_login(self):
+        """User clicked 'I'm Logged In' — signal the waiting thread."""
+        self._login_confirmed.set()
+        self._login_status_var.set("Confirming login…")
 
     def _on_login_success(self, name: str):
         self._login_status_var.set(f"Logged in as: {name}  ✓")

@@ -177,33 +177,49 @@ class FBBrowser:
         self,
         timeout_s: int = 300,
         on_poll: Optional[Callable[[str], None]] = None,
+        confirm_event: Optional[threading.Event] = None,
     ) -> bool:
+        """
+        Wait until Facebook login is detected automatically, OR until the
+        caller signals confirm_event (user clicked "I'm Logged In").
+        """
+        # Login-page URL fragments — if ANY of these appear we're not logged in
+        _login_paths = ("/login", "/reg", "/recover", "login.php")
+
         deadline = time.time() + timeout_s
         while time.time() < deadline:
+            # Manual confirmation from the UI button
+            if confirm_event and confirm_event.is_set():
+                self._grab_username()
+                self._save_session()
+                return True
+
             try:
                 url = self._page.url
-                if (
-                    "facebook.com" in url
-                    and "login" not in url
-                    and "checkpoint" not in url
-                ):
-                    try:
-                        el = self._page.query_selector(
-                            '[aria-label="Your profile"], '
-                            'span[class*="profileName"]'
-                        )
-                        self.logged_in_as = el.inner_text().strip() if el else "Facebook User"
-                    except Exception:
-                        self.logged_in_as = "Facebook User"
-                    # Save session so next launch skips login
+                on_login_page = any(p in url for p in _login_paths)
+                if "facebook.com" in url and not on_login_page:
+                    self._grab_username()
                     self._save_session()
                     return True
             except Exception:
                 pass
+
             if on_poll:
-                on_poll("Waiting for Facebook login…")
+                on_poll(
+                    "Waiting for login… "
+                    "(log in to Facebook in the browser, then click \"I'm Logged In\")"
+                )
             time.sleep(1)
         return False
+
+    def _grab_username(self):
+        try:
+            el = self._page.query_selector(
+                '[aria-label="Your profile"], span[class*="profileName"]'
+            )
+            self.logged_in_as = el.inner_text().strip() if el else "Facebook User"
+        except Exception:
+            self.logged_in_as = "Facebook User"
 
     def _save_session(self):
         try:
