@@ -689,12 +689,9 @@ class App(tk.Tk):
         if self._active_list:
             self._find_btn.config(state=tk.NORMAL)
 
-    def _on_stopped(self):
-        self._set_busy(False)
-        self._status_var.set("Stopped.")
-
     def _on_error(self, msg: str):
-        self._set_busy(False)
+        self._set_scan_busy(False)
+        self._set_find_busy(False)
         self._status_var.set(f"Error: {msg}")
         messagebox.showerror("Error", msg)
 
@@ -720,12 +717,98 @@ class App(tk.Tk):
         # Legacy alias used by remove flow (Group 6 will route through worker).
         self._set_find_busy(busy)
 
-    # ── Group 5 stub (filled in by later group) ──────────────────────────────
+    # ── Find Members flow (Step 3) ───────────────────────────────────────────
 
     def _start_find_members(self):
-        messagebox.showinfo(
-            "Coming up",
-            "Find Members handler is wired in Group 5."
+        group_raw = self._group_var.get().strip()
+        if not group_raw:
+            messagebox.showwarning("No Group",
+                                   "Enter a Facebook Group URL or ID first.")
+            return
+        if not self._browser:
+            messagebox.showwarning("Not Logged In",
+                                   "Open a browser and log in first.")
+            return
+        if not self._active_list:
+            messagebox.showwarning(
+                "No Active List",
+                "Run Step 2 (Scan Feed) first to build the active list.",
+            )
+            return
+
+        group_id = _group_id_from_input(group_raw)
+        active_set = set(self._active_list)
+        inactive_limit = max(1, self._daily_limit_var.get())
+
+        self._results.clear()
+        self._checked.clear()
+        self._refresh_table()
+        self._progress_var.set(0)
+        self._stop_event.clear()
+        self._set_find_busy(True)
+        self._status_var.set(
+            f"Scanning members of {group_id} "
+            f"(stopping after {inactive_limit} inactive)…"
+        )
+
+        self._worker.dispatch(
+            lambda: self._find_members_worker(group_id, active_set, inactive_limit)
+        )
+
+    def _find_members_worker(self, group_id: str, active_set: Set[str],
+                             inactive_limit: int):
+        def status(m):
+            self.after(0, lambda msg=m: self._status_var.set(msg))
+
+        try:
+            members = self._browser.scrape_members(
+                group_id,
+                active_set=active_set,
+                inactive_limit=inactive_limit,
+                on_status=status,
+                stop_event=self._stop_event,
+            )
+            stopped = self._stop_event.is_set()
+            self.after(
+                0,
+                lambda r=members, st=stopped: self._on_find_complete(r, st),
+            )
+        except Exception as exc:
+            msg = str(exc)
+            self.after(0, lambda m=msg: self._on_error(m))
+
+    def _on_find_complete(self, results: List[Dict], stopped: bool = False):
+        # Inactive first, then new members, then active, then alphabetical.
+        def sort_key(r):
+            if r.get("admin"):
+                rank = 3
+            elif r.get("active"):
+                rank = 2
+            elif r.get("new_member"):
+                rank = 1
+            else:
+                rank = 0
+            return (rank, r["name"].lower())
+
+        results.sort(key=sort_key)
+        self._results = results
+        self._set_find_busy(False)
+        self._sel_btn.config(state=tk.NORMAL)
+        self._desel_btn.config(state=tk.NORMAL)
+        self._export_btn.config(state=tk.NORMAL)
+        self._progress_var.set(100 if not stopped else 0)
+        self._refresh_table()
+
+        total    = len(results)
+        active   = sum(1 for r in results if r.get("active"))
+        new_m    = sum(1 for r in results if r.get("new_member"))
+        admin    = sum(1 for r in results if r.get("admin"))
+        inactive = total - active - new_m - admin
+
+        prefix = "Find stopped" if stopped else "Find complete"
+        self._status_var.set(
+            f"{prefix} — {total} member(s): {active} active, "
+            f"{inactive} inactive, {new_m} new, {admin} admin."
         )
 
     # ── Table ─────────────────────────────────────────────────────────────────
