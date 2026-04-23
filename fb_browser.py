@@ -403,30 +403,37 @@ class FBBrowser:
     )
 
     def _scrape_reactors(self, article, active: Set[str], stop_event=None):
-        """Click the reactor count, scrape names from the modal, close it."""
+        """Click the POST'S reactor count (not any nested comment's), scrape
+        names from the modal, then close it."""
         if stop_event and stop_event.is_set():
             return
-        target = None
         try:
-            for sel in [
-                '[aria-label*="reacted"]',
-                '[aria-label*="reaction"]',
-                '[aria-label*="See who"]',
-            ]:
-                btns = article.query_selector_all(sel)
-                if btns:
-                    target = btns[0]
-                    break
-            if target is None:
-                # Fallback: find a small role="button" whose label matches
-                for btn in article.query_selector_all('div[role="button"]'):
-                    try:
-                        lbl = (btn.get_attribute("aria-label") or "").lower()
-                    except Exception:
-                        continue
-                    if any(p in lbl for p in self._REACTOR_BUTTON_PATTERNS):
-                        target = btn
-                        break
+            # Use a JS walk to find a reactor button that is NOT inside a
+            # nested role="article" (i.e. NOT inside a comment card).
+            handle = self._page.evaluate_handle(
+                """(article) => {
+                    const candidates = article.querySelectorAll(
+                        '[aria-label*="reacted"], [aria-label*="reaction"],'
+                        + ' [aria-label*="See who"]'
+                    );
+                    for (const c of candidates) {
+                        let p = c.parentElement;
+                        let nested = false;
+                        while (p && p !== article) {
+                            if (p.getAttribute &&
+                                p.getAttribute('role') === 'article') {
+                                nested = true;
+                                break;
+                            }
+                            p = p.parentElement;
+                        }
+                        if (!nested) return c;
+                    }
+                    return null;
+                }""",
+                article,
+            )
+            target = handle.as_element() if handle else None
             if target is None:
                 return
             target.scroll_into_view_if_needed(timeout=800)
@@ -630,10 +637,30 @@ class FBBrowser:
         def collect() -> bool:
             nonlocal past_cutoff, articles_seen
             # Only top-level post articles — not comment cards, which are
-            # nested inside posts and also carry role="article".
-            articles = self._page.query_selector_all(
-                '[role="article"]:not([role="article"] [role="article"])'
-            )
+            # nested inside posts and also carry role="article". Use a JS
+            # walk so we don't rely on Selectors-Level-4 :not() support.
+            all_articles = self._page.query_selector_all('[role="article"]')
+            articles = []
+            for art in all_articles:
+                try:
+                    is_nested = self._page.evaluate(
+                        """(el) => {
+                            let p = el.parentElement;
+                            while (p) {
+                                if (p.getAttribute &&
+                                    p.getAttribute('role') === 'article') {
+                                    return true;
+                                }
+                                p = p.parentElement;
+                            }
+                            return false;
+                        }""",
+                        art,
+                    )
+                except Exception:
+                    is_nested = False
+                if not is_nested:
+                    articles.append(art)
             articles_seen = len(articles)
 
             for article in articles:
