@@ -556,7 +556,56 @@ class FBBrowser:
             max_no_new=5,
             stop_event=stop_event,
         )
+
+        # Diagnostic dump: if we saw posts but extracted 0 users, record what
+        # the scraper actually sees so the selector can be adjusted.
+        if articles_seen and not active:
+            self._dump_feed_debug(group_id, status)
+
         return active
+
+    def _dump_feed_debug(self, group_id: str, status: Callable[[str], None]):
+        path = os.path.join(os.path.dirname(SESSION_FILE), "debug_scan.txt")
+        try:
+            articles = self._page.query_selector_all('[role="article"]')[:5]
+            lines = [
+                f"Group: {group_id}",
+                f"URL: {self._page.url}",
+                f"Articles captured: {len(articles)}",
+                "",
+            ]
+            for i, article in enumerate(articles):
+                lines.append(f"=== Article {i + 1} ===")
+                try:
+                    text = article.inner_text() or ""
+                    lines.append(f"Text (first 300): {text[:300].replace(chr(10), ' | ')}")
+                except Exception as exc:
+                    lines.append(f"Text: <error {exc}>")
+
+                try:
+                    links = article.query_selector_all("a[href]")
+                    lines.append(f"<a href> count: {len(links)}")
+                    for link in links[:25]:
+                        try:
+                            href = link.get_attribute("href") or ""
+                            txt  = (link.inner_text() or "")[:60].replace("\n", " ")
+                            role = link.get_attribute("role") or ""
+                            lines.append(f"  href={href!r}  role={role!r}  text={txt!r}")
+                        except Exception:
+                            continue
+                except Exception as exc:
+                    lines.append(f"<a href> query error: {exc}")
+
+                lines.append("")
+
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines))
+            status(
+                f"0 users found — wrote diagnostic to {path}. "
+                f"Please share this file."
+            )
+        except Exception as exc:
+            status(f"0 users found. Could not write debug file: {exc}")
 
     # ── Remove a member ───────────────────────────────────────────────────────
 
