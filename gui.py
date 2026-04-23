@@ -5,16 +5,56 @@ member-removal is driven through that same browser session.
 """
 
 import csv
+import json
+import os
+import queue
 import random
 import threading
 import time
+from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
 from tkinter import ttk
-from typing import Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 import re
 
 from fb_browser import FBBrowser, _group_id_from_input
+
+
+ACTIVE_LIST_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "active_list.json"
+)
+
+
+# ── Browser worker ────────────────────────────────────────────────────────────
+
+class BrowserWorker:
+    """
+    Single daemon thread that owns all browser interactions. GUI code pushes
+    callables onto the queue via dispatch(); the worker runs them one at a
+    time so the Playwright browser is never touched from multiple threads.
+    """
+
+    def __init__(self):
+        self._q: "queue.Queue[Optional[Callable[[], Any]]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            job = self._q.get()
+            if job is None:
+                return
+            try:
+                job()
+            except Exception:
+                pass
+
+    def dispatch(self, job: Callable[[], Any]):
+        self._q.put(job)
+
+    def stop(self):
+        self._q.put(None)
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -184,8 +224,69 @@ class App(tk.Tk):
         self._login_confirmed = threading.Event()
         self._browser: Optional[FBBrowser] = None
 
+        self._worker = BrowserWorker()
+        self._active_list: Set[str] = set()
+        self._active_list_group: str = ""
+        self._active_list_updated: str = ""
+        self._load_active_list()
+
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ── Active list persistence ───────────────────────────────────────────────
+
+    def _load_active_list(self):
+        try:
+            with open(ACTIVE_LIST_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            self._active_list = set(data.get("uids", []))
+            self._active_list_group = data.get("group", "")
+            self._active_list_updated = data.get("updated", "")
+        except (OSError, ValueError):
+            self._active_list = set()
+            self._active_list_group = ""
+            self._active_list_updated = ""
+
+    def _save_active_list(self):
+        data = {
+            "group": self._active_list_group,
+            "updated": self._active_list_updated,
+            "uids": sorted(self._active_list),
+        }
+        try:
+            with open(ACTIVE_LIST_FILE, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError:
+            pass
+
+    def _active_list_status_text(self) -> str:
+        if not self._active_list:
+            return "Active list: empty — run Scan Feed to build it."
+        parts = [f"Active list: {len(self._active_list)} user(s)"]
+        if self._active_list_group:
+            parts.append(f"group {self._active_list_group}")
+        if self._active_list_updated:
+            parts.append(f"updated {self._active_list_updated}")
+        return " — ".join(parts)
+
+    def _clear_active_list(self):
+        if not self._active_list:
+            return
+        if not messagebox.askyesno(
+            "Clear Active List",
+            f"Discard the saved list of {len(self._active_list)} active user(s)?",
+        ):
+            return
+        self._active_list = set()
+        self._active_list_group = ""
+        self._active_list_updated = ""
+        try:
+            if os.path.exists(ACTIVE_LIST_FILE):
+                os.remove(ACTIVE_LIST_FILE)
+        except OSError:
+            pass
+        if hasattr(self, "_active_status_var"):
+            self._active_status_var.set(self._active_list_status_text())
 
     # ── UI construction ───────────────────────────────────────────────────────
 
