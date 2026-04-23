@@ -495,20 +495,23 @@ class FBBrowser:
         label = ""
         try:
             # Find a button that belongs to THIS post (not nested in a comment)
-            # AND whose aria-label/text looks like a reaction count. We check
-            # aria-labels for reacted/reaction/See who/like/love/laugh AND also
-            # text matches like "42", "1.2k", "3 likes".
+            # and whose ARIA-LABEL clearly identifies it as the reactor count.
+            # We DO NOT fall back to plain text matching — that was picking up
+            # timestamps ("22m") and reply counts ("1", "3") by mistake.
             handle = self._page.evaluate_handle(
                 """(article) => {
-                    const keywords = [
-                        'reacted', 'reaction', 'see who',
-                        'people like', 'people love', 'people laugh',
-                        'person like', 'person love',
+                    // Strong aria-label signals that mean "the reactor count".
+                    const strong = [
+                        'all reactions',
+                        'see who reacted',
+                        'see all reactions',
                     ];
-                    const textRE = /^\\s*(\\d+([.,]\\d+)?[km]?)(\\s+(likes?|loves?|reactions?|others?))?\\s*$/i;
-                    const all = article.querySelectorAll(
-                        '[aria-label], [role="button"], span, a, div'
-                    );
+                    // Regex signals for aria-labels like
+                    // "42 likes", "3 loves", "Tyson, Eric and 40 others".
+                    const countRE = /^\\s*\\d+\\s+(likes?|loves?|laughs?|hahas?|wows?|sads?|angrys?|cares?|reactions?|others?)\\b/i;
+                    const summaryRE = /^[\\w .'\\-]{2,40},\\s+[\\w .'\\-]{2,40}(,[^,]+){0,2}\\s+and\\s+\\d+\\s+others?/i;
+
+                    const all = article.querySelectorAll('[aria-label]');
                     for (const c of all) {
                         // Skip if nested inside another role=article (a comment).
                         let p = c.parentElement;
@@ -523,17 +526,19 @@ class FBBrowser:
                         }
                         if (nested) continue;
 
-                        const al = (c.getAttribute &&
-                                    (c.getAttribute('aria-label') || ''))
-                                   .toLowerCase();
-                        if (al && keywords.some(k => al.includes(k))) {
-                            c.__hit_label = al;
+                        const al = (c.getAttribute('aria-label') || '').toLowerCase();
+                        if (!al || al.length > 200) continue;
+
+                        if (strong.some(k => al.includes(k))) {
+                            c.__hit_label = 'aria: ' + al.slice(0,80);
                             return c;
                         }
-                        // Only consider compact text nodes (likely the number).
-                        const txt = (c.innerText || '').trim();
-                        if (txt && txt.length < 30 && textRE.test(txt)) {
-                            c.__hit_label = 'text: ' + txt;
+                        if (countRE.test(al)) {
+                            c.__hit_label = 'aria-count: ' + al.slice(0,80);
+                            return c;
+                        }
+                        if (summaryRE.test(al)) {
+                            c.__hit_label = 'aria-summary: ' + al.slice(0,80);
                             return c;
                         }
                     }
