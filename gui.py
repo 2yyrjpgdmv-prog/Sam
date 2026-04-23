@@ -461,7 +461,8 @@ class App(tk.Tk):
 
         self._filter_var = tk.StringVar(value="all")
         for label, val in [("All", "all"), ("Active ✓", "active"),
-                           ("Inactive ✗", "inactive")]:
+                           ("Inactive ✗", "inactive"),
+                           ("New ★", "new_member")]:
             tk.Radiobutton(bar, text=label, variable=self._filter_var,
                            value=val, bg=WHITE, font=(FONT, 9),
                            command=self._refresh_table,
@@ -479,6 +480,7 @@ class App(tk.Tk):
         for colour, label in [
             ("#e8f5e9", "Active"),
             ("#ffebee", "Inactive"),
+            ("#f3e5f5", "New member (protected)"),
             ("#e3f2fd", "Admin (protected)"),
             ("#fff9c4", "Selected for removal"),
         ]:
@@ -493,15 +495,16 @@ class App(tk.Tk):
             fill=tk.X, padx=10)
 
         # Treeview
-        cols = ("chk", "name", "uid", "status", "admin")
+        cols = ("chk", "name", "uid", "status", "joined", "admin")
         self._tree = ttk.Treeview(f, columns=cols, show="headings",
                                   selectmode="none")
 
         for cid, heading, width, anchor, stretch in [
             ("chk",    "☑",         52,  "center", False),
-            ("name",   "Name",      240, "w",      True),
-            ("uid",    "Profile ID", 170, "center", False),
+            ("name",   "Name",      230, "w",      True),
+            ("uid",    "Profile ID", 160, "center", False),
             ("status", "Status",    115, "center", False),
+            ("joined", "Joined",    130, "center", False),
             ("admin",  "Admin",     70,  "center", False),
         ]:
             self._tree.heading(cid, text=heading)
@@ -515,10 +518,11 @@ class App(tk.Tk):
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
         self._tree.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 2))
 
-        self._tree.tag_configure("active",   background="#e8f5e9", foreground="#1b5e20")
-        self._tree.tag_configure("inactive", background="#ffebee", foreground="#b71c1c")
-        self._tree.tag_configure("admin",    background="#e3f2fd", foreground="#0d47a1")
-        self._tree.tag_configure("checked",  background="#fff9c4", foreground="#333")
+        self._tree.tag_configure("active",     background="#e8f5e9", foreground="#1b5e20")
+        self._tree.tag_configure("inactive",   background="#ffebee", foreground="#b71c1c")
+        self._tree.tag_configure("new_member", background="#f3e5f5", foreground="#6a1b9a")
+        self._tree.tag_configure("admin",      background="#e3f2fd", foreground="#0d47a1")
+        self._tree.tag_configure("checked",    background="#fff9c4", foreground="#333")
 
         self._tree.bind("<Button-1>", self._on_tree_click)
 
@@ -713,10 +717,6 @@ class App(tk.Tk):
         self._find_btn.config(state=find_state)
         self._find_stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
 
-    def _set_busy(self, busy: bool):
-        # Legacy alias used by remove flow (Group 6 will route through worker).
-        self._set_find_busy(busy)
-
     # ── Find Members flow (Step 3) ───────────────────────────────────────────
 
     def _start_find_members(self):
@@ -816,29 +816,46 @@ class App(tk.Tk):
     def _refresh_table(self):
         self._tree.delete(*self._tree.get_children())
 
+        def matches(r, fil):
+            if fil == "all":
+                return True
+            if fil == "active":
+                return bool(r.get("active"))
+            if fil == "new_member":
+                return bool(r.get("new_member"))
+            # inactive: not active, not admin, not new
+            return (not r.get("active")
+                    and not r.get("admin")
+                    and not r.get("new_member"))
+
         fil = self._filter_var.get()
-        shown = [
-            r for r in self._results
-            if fil == "all"
-            or (fil == "active"   and r["active"])
-            or (fil == "inactive" and not r["active"])
-        ]
+        shown = [r for r in self._results if matches(r, fil)]
 
         total    = len(self._results)
-        active   = sum(1 for r in self._results if r["active"])
-        inactive = total - active
+        active   = sum(1 for r in self._results if r.get("active"))
+        new_m    = sum(1 for r in self._results if r.get("new_member"))
+        admin    = sum(1 for r in self._results if r.get("admin"))
+        inactive = total - active - new_m - admin
         sel      = len(self._checked)
         self._summary_var.set(
-            f"Total: {total}  |  Active: {active}  |  "
-            f"Inactive: {inactive}  |  Selected: {sel}"
+            f"Total: {total}  |  Active: {active}  |  Inactive: {inactive}  |  "
+            f"New: {new_m}  |  Admin: {admin}  |  Selected: {sel}"
         )
+
+        def status_text(r):
+            if r.get("active"):
+                return "Active ✓"
+            if r.get("new_member"):
+                return "New ★"
+            return "Inactive ✗"
 
         for r in shown:
             checked = r["id"] in self._checked
             tag = (
-                "checked"  if checked       else
-                "admin"    if r["admin"]    else
-                "active"   if r["active"]   else
+                "checked"    if checked              else
+                "admin"      if r.get("admin")       else
+                "new_member" if r.get("new_member")  else
+                "active"     if r.get("active")      else
                 "inactive"
             )
             self._tree.insert(
@@ -847,15 +864,19 @@ class App(tk.Tk):
                     "☑" if checked else "☐",
                     r["name"],
                     r["id"],
-                    "Active ✓" if r["active"] else "Inactive ✗",
-                    "Yes" if r["admin"] else "",
+                    status_text(r),
+                    r.get("joined_text", ""),
+                    "Yes" if r.get("admin") else "",
                 ),
                 tags=(tag,),
             )
 
         removable = [
             r for r in self._results
-            if r["id"] in self._checked and not r["active"] and not r["admin"]
+            if r["id"] in self._checked
+            and not r.get("active")
+            and not r.get("admin")
+            and not r.get("new_member")
         ]
         self._remove_btn.config(
             state=tk.NORMAL if removable else tk.DISABLED
@@ -867,7 +888,7 @@ class App(tk.Tk):
         if not row or col != "#1":
             return
         member = next((r for r in self._results if r["id"] == row), None)
-        if not member or member["admin"]:
+        if not member or member.get("admin") or member.get("new_member"):
             return
         if row in self._checked:
             self._checked.discard(row)
@@ -877,7 +898,9 @@ class App(tk.Tk):
 
     def _select_all_inactive(self):
         for r in self._results:
-            if not r["active"] and not r["admin"]:
+            if (not r.get("active")
+                    and not r.get("admin")
+                    and not r.get("new_member")):
                 self._checked.add(r["id"])
         self._refresh_table()
 
@@ -890,11 +913,16 @@ class App(tk.Tk):
     def _remove_selected(self):
         removable = [
             r for r in self._results
-            if r["id"] in self._checked and not r["active"] and not r["admin"]
+            if r["id"] in self._checked
+            and not r.get("active")
+            and not r.get("admin")
+            and not r.get("new_member")
         ]
         if not removable:
-            messagebox.showinfo("Nothing Selected",
-                                "Select some inactive non-admin members first.")
+            messagebox.showinfo(
+                "Nothing Selected",
+                "Select some inactive non-admin, non-new members first.",
+            )
             return
 
         group_raw = self._group_var.get().strip()
@@ -910,16 +938,14 @@ class App(tk.Tk):
         # Cap the list to session limit
         members_to_remove = removable[: sched["limit"]]
 
-        self._set_busy(True)
+        self._set_find_busy(True)
         self._remove_btn.config(state=tk.DISABLED)
         self._stop_event.clear()
         self._progress_var.set(0)
 
-        threading.Thread(
-            target=self._remove_worker,
-            args=(group_id, members_to_remove, sched),
-            daemon=True,
-        ).start()
+        self._worker.dispatch(
+            lambda: self._remove_worker(group_id, members_to_remove, sched)
+        )
 
     def _remove_worker(self, group_id: str, members: list, sched: dict):
         """
@@ -995,7 +1021,7 @@ class App(tk.Tk):
         self._results  = [r for r in self._results  if r["id"] not in removed_set]
         self._checked -= removed_set
 
-        self._set_busy(False)
+        self._set_find_busy(False)
         self._refresh_table()
         self._status_var.set(
             f"Done — {len(removed_ids)} removed, {failed} failed."
@@ -1022,15 +1048,26 @@ class App(tk.Tk):
         if not path:
             return
 
+        def status(r):
+            if r.get("active"):
+                return "Active"
+            if r.get("new_member"):
+                return "New"
+            return "Inactive"
+
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=["name", "id", "status", "admin"])
+            w = csv.DictWriter(
+                fh,
+                fieldnames=["name", "id", "status", "joined", "admin"],
+            )
             w.writeheader()
             for r in self._results:
                 w.writerow({
                     "name":   r["name"],
                     "id":     r["id"],
-                    "status": "Active" if r["active"] else "Inactive",
-                    "admin":  "Yes" if r["admin"] else "No",
+                    "status": status(r),
+                    "joined": r.get("joined_text", ""),
+                    "admin":  "Yes" if r.get("admin") else "No",
                 })
         self._status_var.set(f"Exported {len(self._results)} members → {path}")
 
@@ -1039,5 +1076,6 @@ class App(tk.Tk):
     def _on_close(self):
         self._stop_event.set()
         if self._browser:
-            threading.Thread(target=self._browser.close, daemon=True).start()
-        self.destroy()
+            self._worker.dispatch(self._browser.close)
+        self._worker.stop()
+        self.after(1500, self.destroy)
