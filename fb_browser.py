@@ -361,9 +361,6 @@ class FBBrowser:
         "view all comment",
         "more comment",
         "previous comment",
-        "view replies",
-        "view more replies",
-        "more replies",
     )
 
     def _expand_comments(self, article, stop_event=None, max_clicks: int = 6):
@@ -632,7 +629,11 @@ class FBBrowser:
 
         def collect() -> bool:
             nonlocal past_cutoff, articles_seen
-            articles = self._page.query_selector_all('[role="article"]')
+            # Only top-level post articles — not comment cards, which are
+            # nested inside posts and also carry role="article".
+            articles = self._page.query_selector_all(
+                '[role="article"]:not([role="article"] [role="article"])'
+            )
             articles_seen = len(articles)
 
             for article in articles:
