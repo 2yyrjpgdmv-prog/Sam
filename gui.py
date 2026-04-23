@@ -616,9 +616,9 @@ class App(tk.Tk):
         self._scan_feed_btn.config(state=tk.DISABLED)
         self._find_btn.config(state=tk.DISABLED)
 
-    # ── Scan flow ─────────────────────────────────────────────────────────────
+    # ── Scan Feed flow (Step 2) ──────────────────────────────────────────────
 
-    def _start_scan(self):
+    def _start_scan_feed(self):
         group_raw = self._group_var.get().strip()
         if not group_raw:
             messagebox.showwarning("No Group",
@@ -630,81 +630,64 @@ class App(tk.Tk):
             return
 
         group_id = _group_id_from_input(group_raw)
-        days = self._days_var.get()
+        days = max(1, self._days_var.get())
 
-        self._results.clear()
-        self._checked.clear()
-        self._refresh_table()
         self._progress_var.set(0)
         self._stop_event.clear()
-        self._set_busy(True)
+        self._set_scan_busy(True)
+        self._status_var.set(
+            f"Scanning the last {days} day(s) of group {group_id}…"
+        )
 
-        threading.Thread(
-            target=self._scan_worker,
-            args=(group_id, days),
-            daemon=True,
-        ).start()
+        self._worker.dispatch(lambda: self._scan_feed_worker(group_id, days))
 
-    def _scan_worker(self, group_id: str, days: int):
+    def _scan_feed_worker(self, group_id: str, days: int):
         def status(m):
             self.after(0, lambda msg=m: self._status_var.set(msg))
 
-        def progress(pct):
-            self.after(0, lambda p=pct: self._progress_var.set(p))
-
         try:
-            # ── Members ───────────────────────────────────────────────────────
-            status("Fetching group members…")
-            members = self._browser.scrape_members(
-                group_id,
-                on_status=status,
-                stop_event=self._stop_event,
-            )
-            if self._stop_event.is_set():
-                self.after(0, self._on_stopped)
-                return
-            progress(40)
-            status(f"Found {len(members)} members. Now scanning the group feed…")
-
-            # ── Activity ──────────────────────────────────────────────────────
             active_ids = self._browser.scrape_active_users(
                 group_id,
                 days,
                 on_status=status,
                 stop_event=self._stop_event,
             )
-            if self._stop_event.is_set():
-                self.after(0, self._on_stopped)
-                return
-            progress(95)
-
-            # ── Merge ─────────────────────────────────────────────────────────
-            for m in members:
-                m["active"] = m["id"] in active_ids
-
-            # Inactive first, then alphabetical
-            members.sort(key=lambda r: (r["active"], r["name"].lower()))
-
-            progress(100)
-            self.after(0, lambda r=members: self._on_scan_complete(r))
-
+            stopped = self._stop_event.is_set()
+            self.after(
+                0,
+                lambda ids=active_ids, gid=group_id, st=stopped:
+                    self._on_scan_feed_complete(ids, gid, st),
+            )
         except Exception as exc:
             msg = str(exc)
             self.after(0, lambda m=msg: self._on_error(m))
 
-    def _on_scan_complete(self, results: list):
-        self._results = results
-        self._set_busy(False)
-        self._sel_btn.config(state=tk.NORMAL)
-        self._desel_btn.config(state=tk.NORMAL)
-        self._export_btn.config(state=tk.NORMAL)
-        self._refresh_table()
-        active   = sum(1 for r in results if r["active"])
-        inactive = len(results) - active
-        self._status_var.set(
-            f"Scan complete — {len(results)} members: "
-            f"{active} active, {inactive} inactive."
-        )
+    def _on_scan_feed_complete(self, active_ids: Set[str], group_id: str,
+                               stopped: bool):
+        added = len(set(active_ids) - self._active_list)
+        self._active_list |= set(active_ids)
+        self._active_list_group = group_id
+        self._active_list_updated = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self._save_active_list()
+
+        self._active_status_var.set(self._active_list_status_text())
+        self._set_scan_busy(False)
+        self._progress_var.set(100 if not stopped else 0)
+
+        if stopped:
+            self._status_var.set(
+                f"Scan stopped — kept {len(self._active_list)} active user(s)."
+            )
+        else:
+            self._status_var.set(
+                f"Scan complete — found {len(active_ids)} active user(s) "
+                f"({added} new). Active list now {len(self._active_list)} total. "
+                f"Step 3: click Find Members to Remove."
+            )
+
+        # Now that we have an active list, allow Find Members.
+        if self._active_list:
+            self._find_btn.config(state=tk.NORMAL)
 
     def _on_stopped(self):
         self._set_busy(False)
@@ -737,13 +720,7 @@ class App(tk.Tk):
         # Legacy alias used by remove flow (Group 6 will route through worker).
         self._set_find_busy(busy)
 
-    # ── Group 4/5 stubs (filled in by later groups) ──────────────────────────
-
-    def _start_scan_feed(self):
-        messagebox.showinfo(
-            "Coming up",
-            "Scan Feed handler is wired in Group 4."
-        )
+    # ── Group 5 stub (filled in by later group) ──────────────────────────────
 
     def _start_find_members(self):
         messagebox.showinfo(
