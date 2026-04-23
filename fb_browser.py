@@ -68,38 +68,62 @@ def _click(page: Page, element):
 # ── URL helpers ───────────────────────────────────────────────────────────────
 
 def _extract_uid(href: str) -> str:
-    """Return a stable user identifier from a Facebook profile URL."""
+    """Return a stable user identifier from a Facebook profile URL
+    (absolute or relative)."""
     if not href:
         return ""
     href = href.split("#")[0].rstrip("/")
+    # /user/<digits>
     m = re.search(r"/user/(\d+)", href)
     if m:
         return m.group(1)
+    # profile.php?id=<digits> or ?...&id=<digits>
     m = re.search(r"[?&]id=(\d+)", href)
     if m:
         return m.group(1)
+    # Strip query
     clean = href.split("?")[0]
+    _skip = {
+        "groups", "pages", "watch", "marketplace", "gaming", "events",
+        "memories", "saved", "friends", "login", "home", "notifications",
+        "photo", "photos", "video", "videos", "stories", "reels",
+        "help", "settings", "privacy", "ads", "business", "messages",
+        "hashtag", "share", "sharer", "dialog", "l.php", "lm.facebook.com",
+        "profile.php",
+    }
+    # Absolute: facebook.com/<slug>
     m = re.search(r"facebook\.com/([^/]+)$", clean)
     if m:
         slug = m.group(1)
-        _skip = {
-            "groups", "pages", "watch", "marketplace", "gaming", "events",
-            "memories", "saved", "friends", "login", "home", "notifications",
-            "photo", "photos", "video", "videos", "stories", "reels",
-        }
+        if slug and slug not in _skip and not slug.startswith("pg"):
+            return slug.lower()
+    # Relative: /<slug>  (no additional path segments)
+    m = re.fullmatch(r"/([^/]+)", clean)
+    if m:
+        slug = m.group(1)
         if slug and slug not in _skip and not slug.startswith("pg"):
             return slug.lower()
     return ""
 
 
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
 def _parse_relative_time(text: str) -> Optional[datetime]:
-    """Convert Facebook relative timestamps into a datetime."""
+    """Convert Facebook relative or absolute timestamps into a datetime."""
     if not text:
         return None
     now = datetime.now()
     t = text.lower().strip()
-    if "just now" in t:
+    if "just now" in t or "now" == t:
         return now
+    if "today" in t:
+        return now
+    if "yesterday" in t:
+        return now - timedelta(days=1)
 
     patterns = [
         (r"(\d+)\s*s(?:ec|econd)?s?\b",  lambda n: now - timedelta(seconds=n)),
@@ -114,7 +138,44 @@ def _parse_relative_time(text: str) -> Optional[datetime]:
         m = re.search(pattern, t)
         if m:
             return calc(int(m.group(1)))
-    return None
+
+    # "April 22 at 2:15 PM" / "April 22, 2024" / "22 April" / "January 28"
+    m = re.search(
+        r"\b("
+        r"jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec"
+        r")[a-z]*\s+(\d{1,2})(?:[,\s]+(\d{4}))?",
+        t,
+    )
+    if not m:
+        m = re.search(
+            r"\b(\d{1,2})\s+("
+            r"jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec"
+            r")[a-z]*(?:[,\s]+(\d{4}))?",
+            t,
+        )
+        if m:
+            day  = int(m.group(1))
+            mon  = _MONTHS[m.group(2)]
+            year = int(m.group(3)) if m.group(3) else now.year
+        else:
+            return None
+    else:
+        mon  = _MONTHS[m.group(1)]
+        day  = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else now.year
+
+    try:
+        dt = datetime(year, mon, day)
+    except ValueError:
+        return None
+    # Facebook omits the year for recent dates — if the result is in the
+    # future by more than a day, it was actually last year.
+    if dt > now + timedelta(days=1):
+        try:
+            dt = datetime(year - 1, mon, day)
+        except ValueError:
+            return None
+    return dt
 
 
 def _parse_joined(text: str):
@@ -348,7 +409,7 @@ class FBBrowser:
 
         def collect() -> bool:
             nonlocal inactive_count
-            for link in self._page.query_selector_all("a[href*='facebook.com/']"):
+            for link in self._page.query_selector_all("a[href]"):
                 try:
                     href = link.get_attribute("href") or ""
                     if not href or "/groups/" in href:
@@ -471,7 +532,7 @@ class FBBrowser:
                                 past_cutoff = True
                                 return True
 
-                    for link in article.query_selector_all("a[href*='facebook.com/']"):
+                    for link in article.query_selector_all("a[href]"):
                         href = link.get_attribute("href") or ""
                         if "/groups/" in href:
                             continue
@@ -523,7 +584,7 @@ class FBBrowser:
 
             # Locate the member's link
             target = None
-            for link in self._page.query_selector_all("a[href*='facebook.com/']"):
+            for link in self._page.query_selector_all("a[href]"):
                 try:
                     href = link.get_attribute("href") or ""
                     if _extract_uid(href) == uid:
