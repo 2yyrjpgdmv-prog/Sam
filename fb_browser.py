@@ -412,7 +412,7 @@ class FBBrowser:
             for link in self._page.query_selector_all("a[href]"):
                 try:
                     href = link.get_attribute("href") or ""
-                    if not href or "/groups/" in href:
+                    if not href:
                         continue
                     uid = _extract_uid(href)
                     if not uid or uid in seen:
@@ -534,8 +534,6 @@ class FBBrowser:
 
                     for link in article.query_selector_all("a[href]"):
                         href = link.get_attribute("href") or ""
-                        if "/groups/" in href:
-                            continue
                         uid = _extract_uid(href)
                         if uid:
                             active.add(uid)
