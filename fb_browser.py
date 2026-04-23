@@ -363,6 +363,88 @@ class FBBrowser:
         "previous comment",
     )
 
+    # Text-like patterns that look like a Facebook timestamp (must be short
+    # AND match a time shape — stops author-name strings from being parsed).
+    _TIME_TEXT_RE = re.compile(
+        r"("
+        r"^\s*\d+\s*[smhdwy]\b"                      # 23h, 1d, 2w, 5min
+        r"|\bjust\s*now\b"
+        r"|\bnow\b"
+        r"|\byesterday\b"
+        r"|\btoday\b"
+        r"|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b"
+        r"|\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
+        r"|\b\d{1,2}:\d{2}\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def _extract_post_timestamp(self, article):
+        """Return (oldest_datetime, debug_list_of_candidate_texts) for the
+        POST's own timestamp — never a comment's or the author's name."""
+        candidates = []
+        seen_texts: List[str] = []
+
+        def _consider(raw: str):
+            if not raw:
+                return
+            snippet = raw[:60].replace("\n", " ")
+            if not self._TIME_TEXT_RE.search(snippet):
+                return  # Not time-shaped — skip (author names never match).
+            seen_texts.append(snippet[:40])
+            dt = _parse_relative_time(snippet)
+            if dt:
+                candidates.append(dt)
+
+        # Highest-confidence sources: post-permalink links (NOT comment perms).
+        for sel in [
+            'a[href*="/posts/"]',
+            'a[href*="/permalink/"]',
+            'a[href*="story_fbid"]',
+        ]:
+            for el in article.query_selector_all(sel):
+                try:
+                    href = el.get_attribute("href") or ""
+                    if "comment_id" in href:
+                        continue
+                    # Skip if nested inside a comment card.
+                    is_nested = self._page.evaluate(
+                        """(el, art) => {
+                            let p = el.parentElement;
+                            while (p && p !== art) {
+                                if (p.getAttribute &&
+                                    p.getAttribute('role') === 'article') {
+                                    return true;
+                                }
+                                p = p.parentElement;
+                            }
+                            return false;
+                        }""",
+                        el, article,
+                    )
+                    if is_nested:
+                        continue
+                    raw = (el.get_attribute("aria-label")
+                           or el.get_attribute("title")
+                           or el.inner_text()
+                           or "")
+                    _consider(raw)
+                except Exception:
+                    continue
+
+        # Secondary: <abbr> (older Facebook renderings).
+        for el in article.query_selector_all("abbr"):
+            try:
+                raw = (el.get_attribute("title")
+                       or el.get_attribute("aria-label")
+                       or el.inner_text()
+                       or "")
+                _consider(raw)
+            except Exception:
+                continue
+
+        return (min(candidates) if candidates else None, seen_texts)
+
     def _expand_comments(self, article, stop_event=None, max_clicks: int = 6):
         """Click 'View N more comments' / 'View replies' buttons inside an
         article so the hidden commenters become visible to the link scraper."""
@@ -726,21 +808,11 @@ class FBBrowser:
 
                 try:
                     # Oldest timestamp in article = post's own date.
-                    oldest_dt = None
-                    all_timestamps = []
-                    for ts_sel in ["abbr", "a[href*='?__cft__']", "span[id]"]:
-                        for ts_el in article.query_selector_all(ts_sel):
-                            raw = (
-                                ts_el.get_attribute("aria-label")
-                                or ts_el.get_attribute("title")
-                                or ts_el.inner_text()
-                                or ""
-                            )
-                            if raw:
-                                all_timestamps.append(raw[:40])
-                            dt = _parse_relative_time(raw)
-                            if dt and (oldest_dt is None or dt < oldest_dt):
-                                oldest_dt = dt
+                    # Use TARGETED selectors that only hit post-permalink links
+                    # (never author or comment permalinks).
+                    oldest_dt, all_timestamps = self._extract_post_timestamp(
+                        article,
+                    )
 
                     is_old = bool(oldest_dt and oldest_dt < cutoff)
                     if is_old:
