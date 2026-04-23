@@ -117,6 +117,31 @@ def _parse_relative_time(text: str) -> Optional[datetime]:
     return None
 
 
+def _parse_joined(text: str):
+    """Extract join-age from member-card text. Returns (days, display_text)."""
+    if not text:
+        return None, ""
+    t = text.lower()
+    patterns = [
+        (r"joined\s+(\d+)\s*day",      1,   "day"),
+        (r"joined\s+(\d+)\s*week",     7,   "week"),
+        (r"joined\s+(\d+)\s*month",    30,  "month"),
+        (r"joined\s+(\d+)\s*year",     365, "year"),
+        (r"member for\s+(\d+)\s*day",  1,   "day"),
+        (r"member for\s+(\d+)\s*week", 7,   "week"),
+        (r"member for\s+(\d+)\s*month",30,  "month"),
+        (r"member for\s+(\d+)\s*year", 365, "year"),
+    ]
+    for pattern, mult, unit in patterns:
+        m = re.search(pattern, t)
+        if m:
+            n = int(m.group(1))
+            days = n * mult
+            label = f"{n} {unit}{'s' if n != 1 else ''} ago"
+            return days, label
+    return None, ""
+
+
 def _group_id_from_input(raw: str) -> str:
     """Accept a full URL or bare ID/slug and return just the group identifier."""
     raw = raw.strip().rstrip("/")
@@ -298,12 +323,16 @@ class FBBrowser:
     def scrape_members(
         self,
         group_id: str,
+        active_set: Optional[Set[str]] = None,
+        inactive_limit: int = 0,
         on_status: Optional[Callable[[str], None]] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> List[Dict]:
         def status(m):
             if on_status:
                 on_status(m)
+
+        active_set = active_set or set()
 
         status("Opening group members page…")
         self._page.goto(
@@ -315,8 +344,10 @@ class FBBrowser:
 
         seen: Set[str] = set()
         members: List[Dict] = []
+        inactive_count = 0
 
         def collect() -> bool:
+            nonlocal inactive_count
             for link in self._page.query_selector_all("a[href*='facebook.com/']"):
                 try:
                     href = link.get_attribute("href") or ""
@@ -335,11 +366,19 @@ class FBBrowser:
                         continue
 
                     is_admin = False
+                    ctx_html = ""
+                    ctx_text = ""
                     try:
                         ctx_html = self._page.evaluate(
                             """el=>{let p=el;for(let i=0;i<7;i++){
                                 if(!p.parentElement)break;p=p.parentElement;}
                                 return p.innerHTML;}""",
+                            link,
+                        )
+                        ctx_text = self._page.evaluate(
+                            """el=>{let p=el;for(let i=0;i<7;i++){
+                                if(!p.parentElement)break;p=p.parentElement;}
+                                return p.innerText;}""",
                             link,
                         )
                         is_admin = bool(
@@ -348,17 +387,32 @@ class FBBrowser:
                     except Exception:
                         pass
 
+                    joined_days, joined_text = _parse_joined(ctx_text)
+                    new_member = joined_days is not None and joined_days < 30
+                    is_active = (uid in active_set) or new_member
+
                     members.append({
                         "id": uid,
                         "name": name,
                         "href": href.split("?")[0],
                         "admin": is_admin,
-                        "active": False,
+                        "active": is_active,
+                        "new_member": new_member,
+                        "joined_days": joined_days,
+                        "joined_text": joined_text,
                     })
+
+                    if not is_active and not is_admin:
+                        inactive_count += 1
                 except Exception:
                     continue
 
-            status(f"Found {len(members)} members — scrolling for more…")
+            status(
+                f"Found {len(members)} members — "
+                f"{inactive_count} inactive so far…"
+            )
+            if inactive_limit > 0 and inactive_count >= inactive_limit:
+                return True
             return False
 
         self._scroll_load(
@@ -376,7 +430,7 @@ class FBBrowser:
     def scrape_active_users(
         self,
         group_id: str,
-        months: int,
+        days: int,
         on_status: Optional[Callable[[str], None]] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> Set[str]:
@@ -384,7 +438,7 @@ class FBBrowser:
             if on_status:
                 on_status(m)
 
-        cutoff = datetime.now() - timedelta(days=months * 30)
+        cutoff = datetime.now() - timedelta(days=days)
         active: Set[str] = set()
         past_cutoff = False
         articles_seen = 0
