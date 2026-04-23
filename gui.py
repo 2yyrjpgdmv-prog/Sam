@@ -572,7 +572,7 @@ class App(tk.Tk):
                 self.after(0, self._confirm_login_btn.pack_forget)
                 self.after(0, lambda m=msg: self._on_login_error(m))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker.dispatch(worker)
 
     def _confirm_login(self):
         """User clicked 'I'm Logged In' — signal the waiting thread."""
