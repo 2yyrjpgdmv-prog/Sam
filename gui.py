@@ -325,14 +325,24 @@ class App(tk.Tk):
                  font=(FONT, 8), fg="gray", bg=WHITE).grid(
             row=0, column=2, sticky="w", padx=4)
 
-        tk.Label(f, text="Inactive after:", **lbl).grid(
+        tk.Label(f, text="Days to scan back:", **lbl).grid(
             row=1, column=0, sticky="w", pady=4)
         tf = tk.Frame(f, bg=WHITE)
         tf.grid(row=1, column=1, sticky="w", padx=6)
-        self._months_var = tk.IntVar(value=3)
-        tk.Spinbox(tf, from_=1, to=24, textvariable=self._months_var,
-                   width=4, font=(FONT, 9)).pack(side=tk.LEFT)
-        tk.Label(tf, text=" months without posting, commenting, or reacting",
+        self._days_var = tk.IntVar(value=7)
+        tk.Spinbox(tf, from_=1, to=365, textvariable=self._days_var,
+                   width=5, font=(FONT, 9)).pack(side=tk.LEFT)
+        tk.Label(tf, text=" days of group feed to treat as 'recently active'",
+                 font=(FONT, 9), bg=WHITE, fg="#555").pack(side=tk.LEFT)
+
+        tk.Label(f, text="Daily removal limit:", **lbl).grid(
+            row=2, column=0, sticky="w", pady=4)
+        df = tk.Frame(f, bg=WHITE)
+        df.grid(row=2, column=1, sticky="w", padx=6)
+        self._daily_limit_var = tk.IntVar(value=50)
+        tk.Spinbox(df, from_=10, to=200, textvariable=self._daily_limit_var,
+                   width=5, font=(FONT, 9)).pack(side=tk.LEFT)
+        tk.Label(df, text=" max members to scan as inactive before stopping",
                  font=(FONT, 9), bg=WHITE, fg="#555").pack(side=tk.LEFT)
 
         f.columnconfigure(1, weight=1)
@@ -591,7 +601,7 @@ class App(tk.Tk):
             return
 
         group_id = _group_id_from_input(group_raw)
-        months = self._months_var.get()
+        days = self._days_var.get()
 
         self._results.clear()
         self._checked.clear()
@@ -602,11 +612,11 @@ class App(tk.Tk):
 
         threading.Thread(
             target=self._scan_worker,
-            args=(group_id, months),
+            args=(group_id, days),
             daemon=True,
         ).start()
 
-    def _scan_worker(self, group_id: str, months: int):
+    def _scan_worker(self, group_id: str, days: int):
         def status(m):
             self.after(0, lambda msg=m: self._status_var.set(msg))
 
@@ -630,7 +640,7 @@ class App(tk.Tk):
             # ── Activity ──────────────────────────────────────────────────────
             active_ids = self._browser.scrape_active_users(
                 group_id,
-                months,
+                days,
                 on_status=status,
                 stop_event=self._stop_event,
             )
