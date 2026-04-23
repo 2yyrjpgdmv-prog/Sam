@@ -557,31 +557,44 @@ class FBBrowser:
             except Exception:
                 label = ""
             target.scroll_into_view_if_needed(timeout=800)
+            # Human pre-click pause + mouse hover for realism.
+            time.sleep(random.uniform(2.0, 3.6))
+            try:
+                _mouse_to(self._page, target)
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.4, 0.9))
             target.click(timeout=1500)
         except Exception:
             return (label, 0)
 
-        time.sleep(random.uniform(1.0, 1.8))
+        # Wait for modal to render — Facebook often lazy-loads the list.
+        time.sleep(random.uniform(2.0, 3.2))
         try:
             dialog = self._page.query_selector('[role="dialog"]')
             if dialog is None:
                 self._dismiss()
                 return (label, 0)
 
-            # Scroll the dialog content a few times to load more reactors.
-            for _ in range(4):
+            # Scroll the dialog slowly — one scroll every 1.5–3 seconds, 6
+            # scrolls total. Mimics a human browsing the reactor list.
+            for i in range(6):
                 if stop_event and stop_event.is_set():
                     break
                 try:
                     self._page.evaluate(
                         "(d)=>{const ss=d.querySelectorAll('*');"
                         "for(const e of ss){if(e.scrollHeight>e.clientHeight+50)"
-                        "{e.scrollTop=e.scrollHeight; break;}}}",
+                        "{e.scrollTop+=Math.max(200, e.clientHeight*0.7);"
+                        " break;}}}",
                         dialog,
                     )
                 except Exception:
                     pass
-                time.sleep(random.uniform(0.5, 0.9))
+                time.sleep(random.uniform(1.5, 3.0))
+
+            # Quick pause to "read" before scraping.
+            time.sleep(random.uniform(0.6, 1.2))
 
             for link in dialog.query_selector_all("a[href]"):
                 try:
@@ -593,7 +606,8 @@ class FBBrowser:
                     continue
         finally:
             self._dismiss()
-            time.sleep(random.uniform(0.3, 0.6))
+            # Post-close breathing room before we touch the next post.
+            time.sleep(random.uniform(1.2, 2.2))
         return (label, len(active) - pre_count)
 
     def _scroll_load(
