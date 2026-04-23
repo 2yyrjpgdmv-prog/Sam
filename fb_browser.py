@@ -404,19 +404,31 @@ class FBBrowser:
 
     def _scrape_reactors(self, article, active: Set[str], stop_event=None):
         """Click the POST'S reactor count (not any nested comment's), scrape
-        names from the modal, then close it."""
+        names from the modal, then close it. Returns (label, names_captured)
+        where label is the aria-label/text of the clicked button (for debug),
+        and names_captured is how many UIDs were added from the modal."""
         if stop_event and stop_event.is_set():
-            return
+            return ("", 0)
+        pre_count = len(active)
+        label = ""
         try:
-            # Use a JS walk to find a reactor button that is NOT inside a
-            # nested role="article" (i.e. NOT inside a comment card).
+            # Find a button that belongs to THIS post (not nested in a comment)
+            # AND whose aria-label/text looks like a reaction count. We check
+            # aria-labels for reacted/reaction/See who/like/love/laugh AND also
+            # text matches like "42", "1.2k", "3 likes".
             handle = self._page.evaluate_handle(
                 """(article) => {
-                    const candidates = article.querySelectorAll(
-                        '[aria-label*="reacted"], [aria-label*="reaction"],'
-                        + ' [aria-label*="See who"]'
+                    const keywords = [
+                        'reacted', 'reaction', 'see who',
+                        'people like', 'people love', 'people laugh',
+                        'person like', 'person love',
+                    ];
+                    const textRE = /^\\s*(\\d+([.,]\\d+)?[km]?)(\\s+(likes?|loves?|reactions?|others?))?\\s*$/i;
+                    const all = article.querySelectorAll(
+                        '[aria-label], [role="button"], span, a, div'
                     );
-                    for (const c of candidates) {
+                    for (const c of all) {
+                        // Skip if nested inside another role=article (a comment).
                         let p = c.parentElement;
                         let nested = false;
                         while (p && p !== article) {
@@ -427,7 +439,21 @@ class FBBrowser:
                             }
                             p = p.parentElement;
                         }
-                        if (!nested) return c;
+                        if (nested) continue;
+
+                        const al = (c.getAttribute &&
+                                    (c.getAttribute('aria-label') || ''))
+                                   .toLowerCase();
+                        if (al && keywords.some(k => al.includes(k))) {
+                            c.__hit_label = al;
+                            return c;
+                        }
+                        // Only consider compact text nodes (likely the number).
+                        const txt = (c.innerText || '').trim();
+                        if (txt && txt.length < 30 && textRE.test(txt)) {
+                            c.__hit_label = 'text: ' + txt;
+                            return c;
+                        }
                     }
                     return null;
                 }""",
@@ -435,18 +461,25 @@ class FBBrowser:
             )
             target = handle.as_element() if handle else None
             if target is None:
-                return
+                return ("", 0)
+            try:
+                label = self._page.evaluate(
+                    "(el)=>el.__hit_label || (el.getAttribute && el.getAttribute('aria-label')) || (el.innerText||'').slice(0,40)",
+                    target,
+                ) or ""
+            except Exception:
+                label = ""
             target.scroll_into_view_if_needed(timeout=800)
             target.click(timeout=1500)
         except Exception:
-            return
+            return (label, 0)
 
         time.sleep(random.uniform(1.0, 1.8))
         try:
             dialog = self._page.query_selector('[role="dialog"]')
             if dialog is None:
                 self._dismiss()
-                return
+                return (label, 0)
 
             # Scroll the dialog content a few times to load more reactors.
             for _ in range(4):
@@ -474,6 +507,7 @@ class FBBrowser:
         finally:
             self._dismiss()
             time.sleep(random.uniform(0.3, 0.6))
+        return (label, len(active) - pre_count)
 
     def _scroll_load(
         self,
@@ -623,8 +657,15 @@ class FBBrowser:
 
         cutoff = datetime.now() - timedelta(days=days)
         active: Set[str] = set()
-        past_cutoff = False
         articles_seen = 0
+        consecutive_old = 0
+        CUTOFF_STREAK = 2  # need 2 old-in-a-row before stopping
+        seen_article_ids = set()
+        debug_lines: List[str] = [
+            f"Group: {group_id}",
+            f"Days cutoff: {days} (cutoff = {cutoff})",
+            "",
+        ]
 
         status("Opening group feed…")
         self._page.goto(
@@ -635,10 +676,9 @@ class FBBrowser:
         self._dismiss()
 
         def collect() -> bool:
-            nonlocal past_cutoff, articles_seen
+            nonlocal articles_seen, consecutive_old
             # Only top-level post articles — not comment cards, which are
-            # nested inside posts and also carry role="article". Use a JS
-            # walk so we don't rely on Selectors-Level-4 :not() support.
+            # nested inside posts and also carry role="article".
             all_articles = self._page.query_selector_all('[role="article"]')
             articles = []
             for art in all_articles:
@@ -666,11 +706,28 @@ class FBBrowser:
             for article in articles:
                 if stop_event and stop_event.is_set():
                     return True
+                # Skip articles we already processed to avoid double-work.
                 try:
-                    # Use the OLDEST timestamp in the article — comments are
-                    # always newer than the post, and we want the post's date
-                    # for the cutoff check.
+                    art_key = self._page.evaluate(
+                        """(el) => {
+                            const hrefs = Array.from(
+                                el.querySelectorAll('a[href]')
+                            ).slice(0,3).map(a=>a.getAttribute('href')||'').join('|');
+                            return (el.innerText||'').slice(0,120) + '##' + hrefs;
+                        }""",
+                        article,
+                    )
+                except Exception:
+                    art_key = None
+                if art_key and art_key in seen_article_ids:
+                    continue
+                if art_key:
+                    seen_article_ids.add(art_key)
+
+                try:
+                    # Oldest timestamp in article = post's own date.
                     oldest_dt = None
+                    all_timestamps = []
                     for ts_sel in ["abbr", "a[href*='?__cft__']", "span[id]"]:
                         for ts_el in article.query_selector_all(ts_sel):
                             raw = (
@@ -679,31 +736,63 @@ class FBBrowser:
                                 or ts_el.inner_text()
                                 or ""
                             )
+                            if raw:
+                                all_timestamps.append(raw[:40])
                             dt = _parse_relative_time(raw)
                             if dt and (oldest_dt is None or dt < oldest_dt):
                                 oldest_dt = dt
-                    if oldest_dt and oldest_dt < cutoff:
-                        past_cutoff = True
+
+                    is_old = bool(oldest_dt and oldest_dt < cutoff)
+                    if is_old:
+                        consecutive_old += 1
+                    else:
+                        consecutive_old = 0
+
+                    pre_count = len(active)
+
+                    # Only do the heavy click-work if the post is within the
+                    # cutoff window — no point opening modals for old posts.
+                    react_label = ""
+                    reactors = 0
+                    if not is_old:
+                        self._expand_comments(article, stop_event)
+                        react_label, reactors = self._scrape_reactors(
+                            article, active, stop_event,
+                        )
+
+                        for link in article.query_selector_all("a[href]"):
+                            href = link.get_attribute("href") or ""
+                            uid = _extract_uid(href)
+                            if uid:
+                                active.add(uid)
+
+                    gained = len(active) - pre_count
+                    debug_lines.append(
+                        f"Post #{len(seen_article_ids)}: "
+                        f"oldest_ts={oldest_dt}  is_old={is_old}  "
+                        f"streak={consecutive_old}  "
+                        f"reactor_btn={react_label!r}  "
+                        f"reactors_modal={reactors}  users_gained={gained}"
+                    )
+                    if len(all_timestamps) > 0:
+                        debug_lines.append(
+                            f"    timestamps seen: {all_timestamps[:8]}"
+                        )
+
+                    if consecutive_old >= CUTOFF_STREAK:
+                        debug_lines.append(
+                            f"Cutoff reached: {consecutive_old} old posts in a row"
+                        )
                         return True
-
-                    # Expand hidden comments and open the reactors dialog so
-                    # we capture commenters and likers, not just visible ones.
-                    self._expand_comments(article, stop_event)
-                    self._scrape_reactors(article, active, stop_event)
-
-                    for link in article.query_selector_all("a[href]"):
-                        href = link.get_attribute("href") or ""
-                        uid = _extract_uid(href)
-                        if uid:
-                            active.add(uid)
-                except Exception:
+                except Exception as exc:
+                    debug_lines.append(f"Post error: {exc}")
                     continue
 
             status(
-                f"Scanned {articles_seen} posts — "
+                f"Scanned {len(seen_article_ids)} posts — "
                 f"{len(active)} active users found so far…"
             )
-            return past_cutoff
+            return False
 
         self._scroll_load(
             collect,
@@ -714,10 +803,18 @@ class FBBrowser:
             stop_event=stop_event,
         )
 
-        # Diagnostic dump: if we saw posts but extracted 0 users, record what
-        # the scraper actually sees so the selector can be adjusted.
-        if articles_seen and not active:
-            self._dump_feed_debug(group_id, status)
+        # Always write a debug log so we can diagnose what happened per post.
+        try:
+            path = os.path.join(os.path.dirname(SESSION_FILE), "debug_scan.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(debug_lines))
+                fh.write(f"\n\nTotal posts scanned: {len(seen_article_ids)}\n")
+                fh.write(f"Total active users captured: {len(active)}\n")
+            status(
+                f"Scan done — {len(active)} users. Debug log: {path}"
+            )
+        except Exception:
+            pass
 
         return active
 
