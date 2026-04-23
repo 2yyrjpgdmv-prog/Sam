@@ -778,29 +778,43 @@ class FBBrowser:
 
         def collect() -> bool:
             nonlocal articles_seen, consecutive_old
-            # Only top-level post articles — not comment cards, which are
-            # nested inside posts and also carry role="article".
+            # Filter to REAL POSTS only. A post article has at least one
+            # /posts/ or /permalink/ link WITHOUT comment_id=...  — comment
+            # cards only have permalink hrefs that include comment_id.
             all_articles = self._page.query_selector_all('[role="article"]')
             articles = []
             for art in all_articles:
                 try:
-                    is_nested = self._page.evaluate(
+                    is_real_post = self._page.evaluate(
                         """(el) => {
+                            // Skip if nested inside another article (defensive).
                             let p = el.parentElement;
                             while (p) {
                                 if (p.getAttribute &&
                                     p.getAttribute('role') === 'article') {
-                                    return true;
+                                    return false;
                                 }
                                 p = p.parentElement;
+                            }
+                            // Must have a post-permalink link that is NOT a
+                            // comment permalink.
+                            const links = el.querySelectorAll(
+                                'a[href*="/posts/"], a[href*="/permalink/"],'
+                                + ' a[href*="story_fbid"]'
+                            );
+                            for (const a of links) {
+                                const href = a.getAttribute('href') || '';
+                                if (!href.includes('comment_id')) {
+                                    return true;
+                                }
                             }
                             return false;
                         }""",
                         art,
                     )
                 except Exception:
-                    is_nested = False
-                if not is_nested:
+                    is_real_post = False
+                if is_real_post:
                     articles.append(art)
             articles_seen = len(articles)
 
