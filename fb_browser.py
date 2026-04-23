@@ -353,6 +353,124 @@ class FBBrowser:
             pass
         time.sleep(random.uniform(0.3, 0.6))
 
+    # ── Comment / reactor expansion ───────────────────────────────────────────
+
+    _COMMENT_BUTTON_PATTERNS = (
+        "view previous comment",
+        "view more comment",
+        "view all comment",
+        "more comment",
+        "previous comment",
+        "view replies",
+        "view more replies",
+        "more replies",
+    )
+
+    def _expand_comments(self, article, stop_event=None, max_clicks: int = 6):
+        """Click 'View N more comments' / 'View replies' buttons inside an
+        article so the hidden commenters become visible to the link scraper."""
+        for _ in range(max_clicks):
+            if stop_event and stop_event.is_set():
+                return
+            clicked = False
+            try:
+                buttons = article.query_selector_all('div[role="button"]')
+            except Exception:
+                return
+            for btn in buttons:
+                try:
+                    txt = (btn.inner_text() or "").strip().lower()
+                except Exception:
+                    continue
+                if not txt or len(txt) > 60:
+                    continue
+                if not any(p in txt for p in self._COMMENT_BUTTON_PATTERNS):
+                    continue
+                try:
+                    btn.scroll_into_view_if_needed(timeout=800)
+                    btn.click(timeout=1200)
+                    clicked = True
+                    time.sleep(random.uniform(0.5, 1.0))
+                    break  # re-query after each click — DOM changes
+                except Exception:
+                    continue
+            if not clicked:
+                return
+
+    _REACTOR_BUTTON_PATTERNS = (
+        "see who reacted",
+        "people reacted",
+        "person reacted",
+        "reactions",
+        "all reactions",
+    )
+
+    def _scrape_reactors(self, article, active: Set[str], stop_event=None):
+        """Click the reactor count, scrape names from the modal, close it."""
+        if stop_event and stop_event.is_set():
+            return
+        target = None
+        try:
+            for sel in [
+                '[aria-label*="reacted"]',
+                '[aria-label*="reaction"]',
+                '[aria-label*="See who"]',
+            ]:
+                btns = article.query_selector_all(sel)
+                if btns:
+                    target = btns[0]
+                    break
+            if target is None:
+                # Fallback: find a small role="button" whose label matches
+                for btn in article.query_selector_all('div[role="button"]'):
+                    try:
+                        lbl = (btn.get_attribute("aria-label") or "").lower()
+                    except Exception:
+                        continue
+                    if any(p in lbl for p in self._REACTOR_BUTTON_PATTERNS):
+                        target = btn
+                        break
+            if target is None:
+                return
+            target.scroll_into_view_if_needed(timeout=800)
+            target.click(timeout=1500)
+        except Exception:
+            return
+
+        time.sleep(random.uniform(1.0, 1.8))
+        try:
+            dialog = self._page.query_selector('[role="dialog"]')
+            if dialog is None:
+                self._dismiss()
+                return
+
+            # Scroll the dialog content a few times to load more reactors.
+            for _ in range(4):
+                if stop_event and stop_event.is_set():
+                    break
+                try:
+                    self._page.evaluate(
+                        "(d)=>{const ss=d.querySelectorAll('*');"
+                        "for(const e of ss){if(e.scrollHeight>e.clientHeight+50)"
+                        "{e.scrollTop=e.scrollHeight; break;}}}",
+                        dialog,
+                    )
+                except Exception:
+                    pass
+                time.sleep(random.uniform(0.5, 0.9))
+
+            for link in dialog.query_selector_all("a[href]"):
+                try:
+                    href = link.get_attribute("href") or ""
+                    uid = _extract_uid(href)
+                    if uid:
+                        active.add(uid)
+                except Exception:
+                    continue
+        finally:
+            self._dismiss()
+            time.sleep(random.uniform(0.3, 0.6))
+
     def _scroll_load(
         self,
         on_each: Callable[[], bool],
@@ -518,7 +636,13 @@ class FBBrowser:
             articles_seen = len(articles)
 
             for article in articles:
+                if stop_event and stop_event.is_set():
+                    return True
                 try:
+                    # Use the OLDEST timestamp in the article — comments are
+                    # always newer than the post, and we want the post's date
+                    # for the cutoff check.
+                    oldest_dt = None
                     for ts_sel in ["abbr", "a[href*='?__cft__']", "span[id]"]:
                         for ts_el in article.query_selector_all(ts_sel):
                             raw = (
@@ -528,9 +652,16 @@ class FBBrowser:
                                 or ""
                             )
                             dt = _parse_relative_time(raw)
-                            if dt and dt < cutoff:
-                                past_cutoff = True
-                                return True
+                            if dt and (oldest_dt is None or dt < oldest_dt):
+                                oldest_dt = dt
+                    if oldest_dt and oldest_dt < cutoff:
+                        past_cutoff = True
+                        return True
+
+                    # Expand hidden comments and open the reactors dialog so
+                    # we capture commenters and likers, not just visible ones.
+                    self._expand_comments(article, stop_event)
+                    self._scrape_reactors(article, active, stop_event)
 
                     for link in article.query_selector_all("a[href]"):
                         href = link.get_attribute("href") or ""
