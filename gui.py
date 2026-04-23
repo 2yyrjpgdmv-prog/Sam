@@ -378,35 +378,59 @@ class App(tk.Tk):
                  font=(FONT, 9), fg="#ffd", bg=FB_DARK).pack(side=tk.LEFT, padx=8)
 
     def _build_action_row(self):
-        f = tk.Frame(self, bg=FB_BLUE)
-        f.pack(fill=tk.X, padx=14, pady=4)
+        # ── Step 2 — Build Active List ────────────────────────────────────────
+        s2 = tk.LabelFrame(self, text="  Step 2 — Build Active List  ",
+                           padx=10, pady=8, bg=WHITE, fg="#222",
+                           font=(FONT, 10, "bold"), relief=tk.GROOVE)
+        s2.pack(fill=tk.X, padx=14, pady=(4, 2))
 
-        tk.Label(f, text="Step 2 — Scan & manage:",
-                 font=(FONT, 9, "bold"), fg=WHITE, bg=FB_BLUE).pack(side=tk.LEFT, padx=(0, 8))
+        self._active_status_var = tk.StringVar(
+            value=self._active_list_status_text())
+        tk.Label(s2, textvariable=self._active_status_var,
+                 font=(FONT, 9), bg=WHITE, fg="#333",
+                 anchor="w").pack(side=tk.LEFT, padx=(2, 10), fill=tk.X, expand=True)
 
-        self._scan_btn = _btn(f, "▶  Scan Group", FB_DARK, self._start_scan,
-                              state=tk.DISABLED)
-        self._scan_btn.pack(side=tk.LEFT)
+        self._clear_active_btn = _btn(s2, "Clear Active List", "#777",
+                                      self._clear_active_list)
+        self._clear_active_btn.pack(side=tk.LEFT, padx=4)
 
-        self._stop_btn = _btn(f, "⏹  Stop", AMBER, self._stop_action,
-                              state=tk.DISABLED)
-        self._stop_btn.pack(side=tk.LEFT, padx=6)
+        self._scan_feed_btn = _btn(s2, "▶  Scan Feed", FB_DARK,
+                                   self._start_scan_feed, state=tk.DISABLED)
+        self._scan_feed_btn.pack(side=tk.LEFT, padx=4)
 
-        self._sel_btn = _btn(f, "Select All Inactive", "#555",
+        self._scan_stop_btn = _btn(s2, "⏹  Stop", AMBER, self._stop_action,
+                                   state=tk.DISABLED)
+        self._scan_stop_btn.pack(side=tk.LEFT, padx=4)
+
+        # ── Step 3 — Find & Remove ────────────────────────────────────────────
+        s3 = tk.LabelFrame(self, text="  Step 3 — Find & Remove  ",
+                           padx=10, pady=8, bg=WHITE, fg="#222",
+                           font=(FONT, 10, "bold"), relief=tk.GROOVE)
+        s3.pack(fill=tk.X, padx=14, pady=(2, 4))
+
+        self._find_btn = _btn(s3, "▶  Find Members to Remove", FB_DARK,
+                              self._start_find_members, state=tk.DISABLED)
+        self._find_btn.pack(side=tk.LEFT, padx=4)
+
+        self._find_stop_btn = _btn(s3, "⏹  Stop", AMBER, self._stop_action,
+                                   state=tk.DISABLED)
+        self._find_stop_btn.pack(side=tk.LEFT, padx=4)
+
+        self._sel_btn = _btn(s3, "Select All Inactive", "#555",
                              self._select_all_inactive, state=tk.DISABLED)
-        self._sel_btn.pack(side=tk.LEFT)
+        self._sel_btn.pack(side=tk.LEFT, padx=4)
 
-        self._desel_btn = _btn(f, "Deselect All", "#777",
+        self._desel_btn = _btn(s3, "Deselect All", "#777",
                                self._deselect_all, state=tk.DISABLED)
-        self._desel_btn.pack(side=tk.LEFT, padx=6)
+        self._desel_btn.pack(side=tk.LEFT, padx=4)
 
-        self._remove_btn = _btn(f, "🗑  Remove Selected", RED,
+        self._remove_btn = _btn(s3, "🗑  Remove Selected", RED,
                                 self._remove_selected, state=tk.DISABLED)
-        self._remove_btn.pack(side=tk.LEFT)
+        self._remove_btn.pack(side=tk.LEFT, padx=4)
 
-        self._export_btn = _btn(f, "💾  Export CSV", TEAL,
+        self._export_btn = _btn(s3, "💾  Export CSV", TEAL,
                                 self._export_csv, state=tk.DISABLED)
-        self._export_btn.pack(side=tk.LEFT, padx=8)
+        self._export_btn.pack(side=tk.LEFT, padx=4)
 
     def _build_progress(self):
         f = tk.Frame(self, bg=FB_BLUE)
@@ -554,8 +578,12 @@ class App(tk.Tk):
     def _on_login_success(self, name: str):
         self._login_status_var.set(f"Logged in as: {name}  ✓")
         self._login_btn.config(text="Re-open Browser", state=tk.NORMAL)
-        self._scan_btn.config(state=tk.NORMAL)
-        self._status_var.set(f"Logged in as {name}. Enter a group URL/ID and click Scan Group.")
+        self._scan_feed_btn.config(state=tk.NORMAL)
+        if self._active_list:
+            self._find_btn.config(state=tk.NORMAL)
+        self._status_var.set(
+            f"Logged in as {name}. Step 2: enter a group URL/ID and click Scan Feed."
+        )
 
     def _on_login_timeout(self):
         self._login_status_var.set("Login timed out. Try again.")
@@ -585,7 +613,8 @@ class App(tk.Tk):
         self._login_status_var.set(
             "Saved login cleared — click Open Browser & Log In to log in again."
         )
-        self._scan_btn.config(state=tk.DISABLED)
+        self._scan_feed_btn.config(state=tk.DISABLED)
+        self._find_btn.config(state=tk.DISABLED)
 
     # ── Scan flow ─────────────────────────────────────────────────────────────
 
@@ -688,12 +717,39 @@ class App(tk.Tk):
 
     def _stop_action(self):
         self._stop_event.set()
-        self._stop_btn.config(state=tk.DISABLED)
+        self._scan_stop_btn.config(state=tk.DISABLED)
+        self._find_stop_btn.config(state=tk.DISABLED)
         self._status_var.set("Stopping…")
 
+    def _set_scan_busy(self, busy: bool):
+        self._scan_feed_btn.config(state=tk.DISABLED if busy else tk.NORMAL)
+        self._scan_stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+        self._clear_active_btn.config(state=tk.DISABLED if busy else tk.NORMAL)
+
+    def _set_find_busy(self, busy: bool):
+        find_state = tk.DISABLED if busy else (
+            tk.NORMAL if self._active_list else tk.DISABLED
+        )
+        self._find_btn.config(state=find_state)
+        self._find_stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+
     def _set_busy(self, busy: bool):
-        self._scan_btn.config(state=tk.DISABLED if busy else tk.NORMAL)
-        self._stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+        # Legacy alias used by remove flow (Group 6 will route through worker).
+        self._set_find_busy(busy)
+
+    # ── Group 4/5 stubs (filled in by later groups) ──────────────────────────
+
+    def _start_scan_feed(self):
+        messagebox.showinfo(
+            "Coming up",
+            "Scan Feed handler is wired in Group 4."
+        )
+
+    def _start_find_members(self):
+        messagebox.showinfo(
+            "Coming up",
+            "Find Members handler is wired in Group 5."
+        )
 
     # ── Table ─────────────────────────────────────────────────────────────────
 
