@@ -318,7 +318,9 @@ class App(tk.Tk):
 
         tk.Label(f, text="Group URL or ID:", **lbl).grid(
             row=0, column=0, sticky="w", pady=4)
-        self._group_var = tk.StringVar()
+        self._group_var = tk.StringVar(
+            value="https://www.facebook.com/groups/menstribe"
+        )
         tk.Entry(f, textvariable=self._group_var, width=66, **ent).grid(
             row=0, column=1, sticky="ew", padx=6)
         tk.Label(f, text="e.g. facebook.com/groups/123… or just the ID",
