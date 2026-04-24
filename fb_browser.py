@@ -776,6 +776,10 @@ class FBBrowser:
         _delay(2.5, 4.0)
         self._dismiss()
 
+        # Raw diagnostic dump: write the first few role="article" elements'
+        # outerHTML so we can see the actual DOM shape Facebook is using today.
+        self._dump_raw_articles(group_id)
+
         def collect() -> bool:
             nonlocal articles_seen, consecutive_old
             # Filter to REAL POSTS only. A post article has at least one
@@ -860,7 +864,10 @@ class FBBrowser:
                     react_label = ""
                     reactors = 0
                     if not is_old:
-                        self._expand_comments(article, stop_event)
+                        # Comment expansion temporarily disabled — it was
+                        # polluting the article list by revealing comment
+                        # cards as sibling role="article" elements.
+                        # self._expand_comments(article, stop_event)
                         react_label, reactors = self._scrape_reactors(
                             article, active, stop_event,
                         )
@@ -922,6 +929,76 @@ class FBBrowser:
             pass
 
         return active
+
+    def _dump_raw_articles(self, group_id: str):
+        """Write raw HTML of the first few role="article" elements so we can
+        see Facebook's actual DOM shape for posts in this group today."""
+        path = os.path.join(os.path.dirname(SESSION_FILE), "raw_debug.txt")
+        try:
+            articles = self._page.query_selector_all('[role="article"]')[:3]
+            lines = [
+                f"Group: {group_id}",
+                f"URL: {self._page.url}",
+                f"Total role=article found: "
+                f"{len(self._page.query_selector_all('[role=article]'))}",
+                f"Dumping first {len(articles)} articles verbatim.",
+                "",
+            ]
+            for i, article in enumerate(articles):
+                lines.append(f"\n========== ARTICLE {i + 1} ==========")
+                try:
+                    outer = self._page.evaluate(
+                        "(el) => el.outerHTML.slice(0, 4000)",
+                        article,
+                    )
+                    lines.append("--- outerHTML (first 4000 chars) ---")
+                    lines.append(outer or "")
+                except Exception as exc:
+                    lines.append(f"outerHTML error: {exc}")
+
+                try:
+                    text = article.inner_text() or ""
+                    lines.append("\n--- inner_text (first 400) ---")
+                    lines.append(text[:400].replace("\n", " | "))
+                except Exception:
+                    pass
+
+                try:
+                    links = article.query_selector_all("a[href]")
+                    lines.append(f"\n--- a[href] count: {len(links)} ---")
+                    for link in links[:25]:
+                        try:
+                            href = link.get_attribute("href") or ""
+                            txt  = (link.inner_text() or "")[:60].replace("\n", " ")
+                            al   = link.get_attribute("aria-label") or ""
+                            lines.append(
+                                f"  href={href[:160]!r} text={txt!r} aria={al[:80]!r}"
+                            )
+                        except Exception:
+                            continue
+                except Exception as exc:
+                    lines.append(f"a[href] error: {exc}")
+
+                try:
+                    ariad = article.query_selector_all("[aria-label]")
+                    lines.append(f"\n--- [aria-label] count: {len(ariad)} ---")
+                    for el in ariad[:30]:
+                        try:
+                            al = el.get_attribute("aria-label") or ""
+                            tag = self._page.evaluate(
+                                "(el)=>el.tagName+(el.getAttribute('role')?'['+el.getAttribute('role')+']':'')",
+                                el,
+                            )
+                            lines.append(f"  {tag}: {al[:140]!r}")
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines))
+        except Exception:
+            pass
 
     def _dump_feed_debug(self, group_id: str, status: Callable[[str], None]):
         path = os.path.join(os.path.dirname(SESSION_FILE), "debug_scan.txt")
