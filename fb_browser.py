@@ -789,44 +789,9 @@ class FBBrowser:
 
         def collect() -> bool:
             nonlocal articles_seen, consecutive_old
-            # Filter to REAL POSTS only. A post article has at least one
-            # /posts/ or /permalink/ link WITHOUT comment_id=...  — comment
-            # cards only have permalink hrefs that include comment_id.
-            all_articles = self._page.query_selector_all('[role="article"]')
-            articles = []
-            for art in all_articles:
-                try:
-                    is_real_post = self._page.evaluate(
-                        """(el) => {
-                            // Skip if nested inside another article (defensive).
-                            let p = el.parentElement;
-                            while (p) {
-                                if (p.getAttribute &&
-                                    p.getAttribute('role') === 'article') {
-                                    return false;
-                                }
-                                p = p.parentElement;
-                            }
-                            // Must have a post-permalink link that is NOT a
-                            // comment permalink.
-                            const links = el.querySelectorAll(
-                                'a[href*="/posts/"], a[href*="/permalink/"],'
-                                + ' a[href*="story_fbid"]'
-                            );
-                            for (const a of links) {
-                                const href = a.getAttribute('href') || '';
-                                if (!href.includes('comment_id')) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }""",
-                        art,
-                    )
-                except Exception:
-                    is_real_post = False
-                if is_real_post:
-                    articles.append(art)
+            # Modern Facebook group feeds use role="article" for COMMENTS only.
+            # Posts are containers with aria-label starting with "Post by".
+            articles = self._find_post_containers()
             articles_seen = len(articles)
 
             for article in articles:
@@ -937,6 +902,40 @@ class FBBrowser:
 
         return active
 
+    def _find_post_containers(self):
+        """Find post container elements (not comments). Modern Facebook
+        labels posts as [aria-label^="Post by"] and comments as
+        [aria-label^="Comment by"]."""
+        # Primary signal: aria-label starts with "Post by" / "Shared" etc.
+        results = []
+        try:
+            handle_list = self._page.query_selector_all(
+                '[aria-label^="Post by"], [aria-label^="Post from"], '
+                '[aria-label^="Shared post"], [aria-label^="Shared a"]'
+            )
+            for h in handle_list:
+                results.append(h)
+        except Exception:
+            pass
+        if results:
+            return results
+        # Fallback: role="article" NOT starting with "Comment by" / "Reply by"
+        try:
+            all_arts = self._page.query_selector_all('[role="article"]')
+            for art in all_arts:
+                try:
+                    al = art.get_attribute("aria-label") or ""
+                except Exception:
+                    al = ""
+                if not al:
+                    continue
+                if al.startswith("Comment by") or al.startswith("Reply by"):
+                    continue
+                results.append(art)
+        except Exception:
+            pass
+        return results
+
     def _wait_for_feed(self, timeout_s: float = 25.0) -> bool:
         """Wait until at least one real (non-loading) role=article is present.
         Returns True if real content loaded, False on timeout."""
@@ -969,6 +968,57 @@ class FBBrowser:
         elements so we can see Facebook's actual DOM shape for posts today."""
         path = os.path.join(os.path.dirname(SESSION_FILE), "raw_debug.txt")
         try:
+            # First: enumerate aria-labels so we can find what Facebook uses
+            # to mark posts (e.g. "Post by X").
+            label_summary = []
+            try:
+                label_summary = self._page.evaluate(
+                    """() => {
+                        const out = {};
+                        const all = document.querySelectorAll('[aria-label]');
+                        for (const el of all) {
+                            const al = el.getAttribute('aria-label') || '';
+                            // Keep the label prefix (first 25 chars) as a key.
+                            const key = al.slice(0, 25);
+                            out[key] = (out[key] || 0) + 1;
+                        }
+                        return Object.entries(out)
+                            .sort((a,b) => b[1]-a[1])
+                            .slice(0, 40);
+                    }"""
+                ) or []
+            except Exception:
+                pass
+
+            post_candidates = []
+            try:
+                post_candidates = self._page.evaluate(
+                    """() => {
+                        const selectors = [
+                            '[aria-label^="Post by"]',
+                            '[aria-label^="Post from"]',
+                            '[aria-label^="Shared"]',
+                            '[aria-label*="posted in"]',
+                            '[aria-label*="posted"]',
+                        ];
+                        const results = [];
+                        for (const sel of selectors) {
+                            const els = document.querySelectorAll(sel);
+                            for (const el of els) {
+                                results.push({
+                                    selector: sel,
+                                    aria: (el.getAttribute('aria-label') || '').slice(0,120),
+                                    tag: el.tagName,
+                                    role: el.getAttribute('role') || '',
+                                });
+                                if (results.length >= 20) return results;
+                            }
+                        }
+                        return results;
+                    }"""
+                ) or []
+            except Exception:
+                pass
             # Filter to articles that aren't skeleton loading placeholders.
             all_arts = self._page.query_selector_all('[role="article"]')
             real_arts = []
@@ -996,9 +1046,25 @@ class FBBrowser:
                 f"URL: {self._page.url}",
                 f"Total role=article found: "
                 f"{len(self._page.query_selector_all('[role=article]'))}",
-                f"Dumping first {len(articles)} articles verbatim.",
                 "",
+                "=== Top aria-label prefixes on the page (count) ===",
             ]
+            for key, count in label_summary:
+                lines.append(f"  {count:4d}  {key!r}")
+            lines.append("")
+            lines.append("=== Post-like candidates (Post by/Shared/posted) ===")
+            if post_candidates:
+                for c in post_candidates:
+                    lines.append(
+                        f"  sel={c.get('selector')!r}  "
+                        f"tag={c.get('tag')}[{c.get('role')}]  "
+                        f"aria={c.get('aria')!r}"
+                    )
+            else:
+                lines.append("  (none found)")
+            lines.append("")
+            lines.append(f"Dumping first {len(articles)} role=article elements verbatim.")
+            lines.append("")
             for i, article in enumerate(articles):
                 lines.append(f"\n========== ARTICLE {i + 1} ==========")
                 try:
