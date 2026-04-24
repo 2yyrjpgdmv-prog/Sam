@@ -776,6 +776,13 @@ class FBBrowser:
         _delay(2.5, 4.0)
         self._dismiss()
 
+        # Wait for real posts to render — Facebook shows skeleton "Loading..."
+        # placeholders first; those aren't usable.
+        status("Waiting for feed content to load…")
+        got_real = self._wait_for_feed(timeout_s=25.0)
+        if not got_real:
+            status("Feed content did not load within 25s — dumping anyway.")
+
         # Raw diagnostic dump: write the first few role="article" elements'
         # outerHTML so we can see the actual DOM shape Facebook is using today.
         self._dump_raw_articles(group_id)
@@ -930,12 +937,60 @@ class FBBrowser:
 
         return active
 
+    def _wait_for_feed(self, timeout_s: float = 25.0) -> bool:
+        """Wait until at least one real (non-loading) role=article is present.
+        Returns True if real content loaded, False on timeout."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                count = self._page.evaluate(
+                    """() => {
+                        const arts = document.querySelectorAll('[role="article"]');
+                        let real = 0;
+                        for (const a of arts) {
+                            const loading = a.querySelector(
+                                '[aria-label="Loading..."][role="status"]'
+                            );
+                            const text = (a.innerText || '').trim();
+                            if (!loading && text.length > 30) real++;
+                        }
+                        return real;
+                    }"""
+                )
+                if count >= 1:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.8)
+        return False
+
     def _dump_raw_articles(self, group_id: str):
-        """Write raw HTML of the first few role="article" elements so we can
-        see Facebook's actual DOM shape for posts in this group today."""
+        """Write raw HTML of the first few REAL (non-loading) role="article"
+        elements so we can see Facebook's actual DOM shape for posts today."""
         path = os.path.join(os.path.dirname(SESSION_FILE), "raw_debug.txt")
         try:
-            articles = self._page.query_selector_all('[role="article"]')[:3]
+            # Filter to articles that aren't skeleton loading placeholders.
+            all_arts = self._page.query_selector_all('[role="article"]')
+            real_arts = []
+            for art in all_arts:
+                try:
+                    is_loading = self._page.evaluate(
+                        """(el) => {
+                            if (el.querySelector(
+                                '[aria-label="Loading..."][role="status"]'
+                            )) return true;
+                            const t = (el.innerText || '').trim();
+                            return t.length < 30;
+                        }""",
+                        art,
+                    )
+                except Exception:
+                    is_loading = False
+                if not is_loading:
+                    real_arts.append(art)
+                if len(real_arts) >= 3:
+                    break
+            articles = real_arts[:3]
             lines = [
                 f"Group: {group_id}",
                 f"URL: {self._page.url}",
