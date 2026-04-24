@@ -770,7 +770,7 @@ class FBBrowser:
 
         status("Opening group feed…")
         self._page.goto(
-            f"{FB}/groups/{group_id}",
+            f"{FB}/groups/{group_id}?sorting_setting=CHRONOLOGICAL",
             wait_until="domcontentloaded",
         )
         _delay(2.5, 4.0)
@@ -778,10 +778,10 @@ class FBBrowser:
 
         # Wait for real posts to render — Facebook shows skeleton "Loading..."
         # placeholders first; those aren't usable.
-        status("Waiting for feed content to load…")
-        got_real = self._wait_for_feed(timeout_s=25.0)
+        status("Waiting for feed content to load (scrolling to trigger)…")
+        got_real = self._wait_for_feed(timeout_s=45.0)
         if not got_real:
-            status("Feed content did not load within 25s — dumping anyway.")
+            status("Feed content did not load within 45s — dumping anyway.")
 
         # Raw diagnostic dump: write the first few role="article" elements'
         # outerHTML so we can see the actual DOM shape Facebook is using today.
@@ -936,14 +936,19 @@ class FBBrowser:
             pass
         return results
 
-    def _wait_for_feed(self, timeout_s: float = 25.0) -> bool:
-        """Wait until at least one real (non-loading) role=article is present.
+    def _wait_for_feed(self, timeout_s: float = 45.0) -> bool:
+        """Wait until at least one real (non-loading) post-like element is
+        present. Scrolls the page every few iterations to trigger lazy-load.
         Returns True if real content loaded, False on timeout."""
         deadline = time.time() + timeout_s
+        iteration = 0
         while time.time() < deadline:
+            iteration += 1
             try:
                 count = self._page.evaluate(
                     """() => {
+                        // Count 'real' post indicators: role=article with real
+                        // text, OR elements whose aria-label starts with "Post".
                         const arts = document.querySelectorAll('[role="article"]');
                         let real = 0;
                         for (const a of arts) {
@@ -953,14 +958,28 @@ class FBBrowser:
                             const text = (a.innerText || '').trim();
                             if (!loading && text.length > 30) real++;
                         }
-                        return real;
+                        const postish = document.querySelectorAll(
+                            '[aria-label^="Post by"],'
+                            + '[aria-label^="Post from"],'
+                            + '[aria-label^="Shared"],'
+                            + '[aria-label*="posted"]'
+                        );
+                        return real + postish.length;
                     }"""
                 )
                 if count >= 1:
                     return True
             except Exception:
                 pass
-            time.sleep(0.8)
+            # Scroll a bit every 3rd iteration to trigger lazy-loading.
+            if iteration % 3 == 0:
+                try:
+                    self._page.evaluate(
+                        "window.scrollBy(0, window.innerHeight * 0.8)"
+                    )
+                except Exception:
+                    pass
+            time.sleep(1.0)
         return False
 
     def _dump_raw_articles(self, group_id: str):
